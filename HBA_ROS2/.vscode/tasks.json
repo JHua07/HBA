@@ -1,0 +1,15 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "ros2-source",
+            "type": "shell",
+            "command": "source /opt/ros/humble/setup.bash && source ~/ws_hba_ros2/install/setup.bash",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+        }
+    ]
+}

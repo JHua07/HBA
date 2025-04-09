@@ -1,0 +1,38 @@
+{
+    "configurations": [
+        {
+            "browse": {
+                "databaseFilename": "${default}",
+                "limitSymbolsToIncludedHeaders": false
+            },
+            "includePath": [
+                "${workspaceFolder}",
+                "/usr/include/**",
+                "/opt/ros/humble/**",
+                "/opt/ros/humble/include/**",
+                "/opt/ros/humble/local/**",
+                "/opt/ros/humble/share/**",
+                "/opt/ros/humble/include/sensor_msgs/",
+                "/opt/ros/humble/include/std_msgs/",
+                "/opt/ros/humble/include/visualization_msgs/",
+                "/opt/ros/humble/include/geometry_msgs/",
+                "/opt/ros/humble/include/tf2/",
+                "/opt/ros/humble/include/tf2_ros/",
+                "/opt/ros/humble/include/pcl_conversions/",
+                "/usr/include/eigen3/",
+                "/usr/include/ceres/",
+                "/usr/include/pcl-1.12/",
+                "/usr/local/include/**",
+                "/usr/local/include/ceres/",
+                "/usr/local/include/gtsam/",
+                "${workspaceFolder}/include"
+            ],
+            "name": "ROS",
+            "intelliSenseMode": "gcc-x64",
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu11",
+            "cppStandard": "c++14"
+        }
+    ],
+    "version": 4
+}

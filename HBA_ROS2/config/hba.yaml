@@ -1,0 +1,6 @@
+/**:
+  ros__parameters:
+    data_path: /home/jhua/hba_data/avia1/
+    total_layer_num: 3
+    pcd_name_fill_num: 0
+    thread_num: 16
