@@ -1,16 +1,16 @@
 {
     "python.autoComplete.extraPaths": [
-        "/home/jhua/catkin_ws/devel/lib/python3/dist-packages",
-        "/home/jhua/plugins/ws_cv_bridge/devel/lib/python3/dist-packages",
-        "/home/jhua/plugins/ws_livox/devel/lib/python3/dist-packages",
-        "/opt/ros/noetic/lib/python3/dist-packages",
+        //"/home/jhua/catkin_ws/devel/lib/python3/dist-packages",
+        //"/home/jhua/plugins/ws_cv_bridge/devel/lib/python3/dist-packages",
+        //"/home/jhua/plugins/ws_livox/devel/lib/python3/dist-packages",
+        //"/opt/ros/noetic/lib/python3/dist-packages",
         "/opt/ros/humble/lib/python3.10/site-packages"
     ],
     "python.analysis.extraPaths": [
-        "/home/jhua/catkin_ws/devel/lib/python3/dist-packages",
-        "/home/jhua/plugins/ws_cv_bridge/devel/lib/python3/dist-packages",
-        "/home/jhua/plugins/ws_livox/devel/lib/python3/dist-packages",
-        "/opt/ros/noetic/lib/python3/dist-packages",
+        //"/home/jhua/catkin_ws/devel/lib/python3/dist-packages",
+        //"/home/jhua/plugins/ws_cv_bridge/devel/lib/python3/dist-packages",
+        //"/home/jhua/plugins/ws_livox/devel/lib/python3/dist-packages",
+        //"/opt/ros/noetic/lib/python3/dist-packages",
         "/opt/ros/humble/lib/python3.10/site-packages"
     ],
     "files.associations": {

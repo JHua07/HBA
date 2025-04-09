@@ -5,7 +5,7 @@
             "name": "ROS2 Launch Debug",
             "type": "cppdbg",
             "request": "launch",
-            "program": "~/ws_hba_ros2/install/lib/hba/hba",
+            "program": "~/ws_hba_ros2_modified/install/lib/hba/hba",
             "args": [],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",

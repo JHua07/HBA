@@ -1,524 +1,577 @@
-#include <iostream>
-#include <iomanip>
-#include <fstream>
-#include <string>
-
-#include <mutex>
-#include <assert.h>
-#include <rclcpp/rclcpp.hpp>
-#include <Eigen/StdVector>
-#include <Eigen/Dense>
-#include <sensor_msgs/msg/imu.h>
-#include <pcl/kdtree/kdtree_flann.h>
-#include <sensor_msgs//msg/point_cloud2.hpp>
-#include <geometry_msgs/msg/pose_array.h>
-#include <tf2_ros/transform_broadcaster.h>
-#include <pcl/io/pcd_io.h>
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/kdtree/kdtree_flann.h>
-#include <pcl_conversions/pcl_conversions.h>
-
-#include "ba.hpp"
 #include "hba.hpp"
-#include "tools.hpp"
-#include "mypcl.hpp"
 
-using namespace std;
-using namespace Eigen;
+HBA::HBA(int total_layer_num_, std::string data_path_, int thread_num_)
+{
+    total_layer_num = total_layer_num_;
+    data_path = data_path_;
+    thread_num = thread_num_;
 
-int pcd_name_fill_num = 0;
-int total_layer_num, thread_num; // 总层数量，线程数量
-string data_path;
+    layers.resize(total_layer_num);
+    for (int i = 0; i < total_layer_num; i++)
+    {
+        layers[i].layer_num = i + 1; // 索引
+        layers[i].thread_num = thread_num;
+    }
+    layers[0].data_path = data_path;
+    layers[0].pose_vec = mypcl::read_pose(data_path + "pose.json");
+    layers[0].init_layer_param();
+    layers[0].init_storage(total_layer_num);
+
+    // 初始化非底层的参数
+    for (int i = 1; i < total_layer_num; i++)
+    {
+        // 上一层除开最后一个线程之外的窗口数量，这里相当于, 从第二层开始，每层的数量都是上一层的数量的1/WIN_SIZE倍
+        int pose_size_ = (layers[i - 1].thread_num - 1) * layers[i - 1].part_length;
+
+        // 加上最后一个线程的窗口数量
+        pose_size_ += layers[i - 1].tail == 0 ? layers[i - 1].left_gap_num : (layers[i - 1].left_gap_num + 1);
+
+        layers[i].init_layer_param(pose_size_);
+        layers[i].init_storage(total_layer_num);
+        layers[i].data_path = layers[i - 1].data_path + "process1/";
+    }
+    std::cout << "HBA init layer done" << std::endl;
+}
+
+void HBA::update_next_layer_state(int cur_layer_num)
+{
+    // 遍历当前层的所有线程
+    for (int i = 0; i < layers[cur_layer_num].thread_num; i++)
+    {
+        if (i < layers[cur_layer_num].thread_num - 1) // 非最后一个线程
+        {
+            // 遍历第i个线程的每个窗口
+            for (int j = 0; j < layers[cur_layer_num].part_length; j++)
+            {
+                int index = (i * layers[cur_layer_num].part_length + j) * GAP; // 当前层的第i个线程的第j个窗口的索引
+
+                // 当前层每个窗口内的第一个点的索引作为下一层的位姿
+                layers[cur_layer_num + 1].pose_vec[i * layers[cur_layer_num].part_length + j] = layers[cur_layer_num].pose_vec[index];
+            }
+        }
+        else
+        {
+            for (int j = 0; j < layers[cur_layer_num].j_upper; j++)
+            {
+                int index = (i * layers[cur_layer_num].part_length + j) * GAP;
+                layers[cur_layer_num + 1].pose_vec[i * layers[cur_layer_num].part_length + j] = layers[cur_layer_num].pose_vec[index];
+            }
+        }
+    }
+}
+
+/*
+    理解：hessian是怎么来的
+    首先，定义Hess是一个60*60的矩阵，分别存放了窗口内10个点的位姿的Hessian矩阵的上三角部分元素
+    1. 在hba.cpp中，通过damping_iter()计算每一个线程的每个窗口的Hessian，
+    1. 通过ba.hpp中的divide_thread()函数，将任务分配给每个线程，调用acc_evaluate2()计算每一个体素内的Hessian矩阵，
+        就是60*60的,然后所有体素的残差，雅各布矩阵和Hessian矩阵累加得到总的Hessian矩阵，雅各布矩阵和残差。（因为Hessian具有线性累加性质，因为 Hessian 矩阵本质上描述的是二阶导数的累积特性）
+    2.
+    */
+// 使用GTSAM进行位姿图优化
+void HBA::pose_graph_optimization()
+{
+    // 初始化位姿和hessian矩阵
+    std::vector<mypcl::pose> upper_pose, init_pose;    // 上层位姿和初始位姿(q,t)
+    upper_pose = layers[total_layer_num - 1].pose_vec; // 顶层位姿
+    init_pose = layers[0].pose_vec;                    // 底层位姿
+    std::vector<VEC(6)> upper_cov, init_cov;           // 上层和初始的协方差矩阵
+    upper_cov = layers[total_layer_num - 1].hessians;
+    init_cov = layers[0].hessians;
+
+    // 初始化gtsam
+    int cnt = 0;
+    gtsam::Values initial;
+    gtsam::NonlinearFactorGraph graph;
+    gtsam::Vector Vector6(6);                      // 定义一个6维向量
+    Vector6 << 1e-6, 1e-6, 1e-6, 1e-8, 1e-8, 1e-8; // 初始化6维向量
+
+    // 先验噪声模型
+    gtsam::noiseModel::Diagonal::shared_ptr priorModel = gtsam::noiseModel::Diagonal::Variances(Vector6);
+
+    // 插入底层的第一个位姿作为初始位姿
+    initial.insert(0, gtsam::Pose3(gtsam::Rot3(init_pose[0].q.toRotationMatrix()), gtsam::Point3(init_pose[0].t)));
+
+    // 添加先验因子
+    graph.add(gtsam::PriorFactor<gtsam::Pose3>(0, gtsam::Pose3(gtsam::Rot3(init_pose[0].q.toRotationMatrix()), gtsam::Point3(init_pose[0].t)), priorModel));
+
+    // 遍历底层的位姿，添加因子到因子图中
+    for (uint i = 0; i < init_pose.size(); i++)
+    {
+        // 逐个添加底层的位姿
+        if (i > 0)
+        {
+            initial.insert(i, gtsam::Pose3(gtsam::Rot3(init_pose[i].q.toRotationMatrix()), gtsam::Point3(init_pose[i].t)));
+        }
+
+        // 添加每个窗口内第一个位姿的因子 i%GAP==0确保了每个窗口的第一个位姿
+        if (i % GAP == 0 && cnt < init_cov.size())
+        {
+            // 遍历窗口中的所有hessian
+            for (int j = 0; j < WIN_SIZE - 1; j++)
+            {
+                for (int k = j + 1; k < WIN_SIZE; k++)
+                {
+                    // 保证调用不越界
+                    if (i + j + 1 >= init_pose.size() || i + k >= init_pose.size())
+                    {
+                        break;
+                    }
+
+                    cnt++; // 这里的cnt是用来计数的，用来计算Hessian矩阵的数量，也就是窗口内两两之间的Hessian矩阵的数量，比如一个窗口内就是10个位姿，那么就有10*9/2个Hessian矩阵
+
+                    if (init_cov[cnt - 1].norm() < 1e-20)
+                    {
+                        continue; // 如果Hessian矩阵的范数小于1e-20（即Hessian过小），跳过
+                    }
+
+                    // 设置窗口内第j个位姿相对于第一个位姿的位移和旋转
+                    Eigen::Vector3d t_ab = init_pose[i + j].t;
+                    Eigen::Matrix3d R_ab = init_pose[i + j].q.toRotationMatrix();
+
+                    // 更新为，窗口内第k个位姿相对于第j个位姿的位移和旋转, 需要这个矩阵主要是为了添加两个节点之间的约束
+                    t_ab = R_ab.transpose() * (init_pose[i + k].t - t_ab);
+                    R_ab = R_ab.transpose() * init_pose[i + k].q.toRotationMatrix();
+
+                    gtsam::Rot3 R_sam(R_ab);
+                    gtsam::Point3 t_sam(t_ab);
+
+                    // 根据位姿间的hessians设置里程计噪声模型
+                    Vector6 << fabs(1.0 / init_cov[cnt - 1](0)), fabs(1.0 / init_cov[cnt - 1](1)), fabs(1.0 / init_cov[cnt - 1](2)),
+                        fabs(1.0 / init_cov[cnt - 1](3)), fabs(1.0 / init_cov[cnt - 1](4)), fabs(1.0 / init_cov[cnt - 1](5));
+                    gtsam::noiseModel::Diagonal::shared_ptr odometryNoise = gtsam::noiseModel::Diagonal::Variances(Vector6);
+
+                    // 添加里程计两两位姿间的factor
+                    gtsam::NonlinearFactor::shared_ptr factor(new gtsam::BetweenFactor<gtsam::Pose3>(i + j, i + k, gtsam::Pose3(R_sam, t_sam), odometryNoise));
+                    graph.push_back(factor);
+                }
+            }
+        }
+    }
+
+    // 遍历顶层的位姿，添加因子到因子图中
+    int pose_size = upper_pose.size();
+    cnt = 0;
+
+    // 不按窗口添加因子，而是直接两两之间添加因子
+    for (int i = 0; i < pose_size - 1; i++)
+    {
+        for (int j = i + 1; j < pose_size; j++)
+        {
+            cnt++;
+            if (upper_cov[cnt - 1].norm() < 1e-20)
+            {
+                continue;
+            }
+
+            Eigen::Vector3d t_ab = upper_pose[i].t;
+            Eigen::Matrix3d R_ab = upper_pose[i].q.toRotationMatrix();
+            t_ab = R_ab.transpose() * (upper_pose[j].t - t_ab);
+            R_ab = R_ab.transpose() * upper_pose[j].q.toRotationMatrix();
+            gtsam::Rot3 R_sam(R_ab);
+            gtsam::Point3 t_sam(t_ab);
+
+            Vector6 << fabs(1.0 / upper_cov[cnt - 1](0)), fabs(1.0 / upper_cov[cnt - 1](1)), fabs(1.0 / upper_cov[cnt - 1](2)),
+                fabs(1.0 / upper_cov[cnt - 1](3)), fabs(1.0 / upper_cov[cnt - 1](4)), fabs(1.0 / upper_cov[cnt - 1](5));
+            gtsam::noiseModel::Diagonal::shared_ptr odometryNoise = gtsam::noiseModel::Diagonal::Variances(Vector6);
+            // 这里使用pow()函数是因为在上一层的时候，每个窗口内的位姿数量是下一层的GAP倍，所以这里需要乘以GAP的total_layer_num - 1次方，这里就是要追溯到底层的位姿索引
+            gtsam::NonlinearFactor::shared_ptr factor(new gtsam::BetweenFactor<gtsam::Pose3>(i * pow(GAP, total_layer_num - 1),
+                                                                                             j * pow(GAP, total_layer_num - 1), gtsam::Pose3(R_sam, t_sam), odometryNoise));
+            graph.push_back(factor);
+        }
+    }
+    // 此时已经完成了所有因子的添加，接下来就是使用gtsam进行优化
+    gtsam::ISAM2Params parameters;
+    // 重新线性化阈值,由于非线性函数的特性，随着优化的进行，误差函数可能会发生较大的变化，导致线性化的误差逐渐增大。为了避免这种误差积累影响优化过程，通常会在优化的过程中引入 重新线性化 的机制
+    parameters.relinearizeThreshold = 0.01;
+    // 重新线性化跳过,设置=1，确保每次迭代都会重新线性化
+    parameters.relinearizeSkip = 1;
+    gtsam::ISAM2 isam(parameters); // 创建ISAM2对象
+    isam.update(graph, initial);   // 引入因子图和初始值
+    isam.update();                 // 进行优化
+
+    gtsam::Values results = isam.calculateEstimate(); // 计算估计值
+
+    cout << "vertex size" << results.size() << endl;
+
+    for (uint i = 0; i < results.size(); i++)
+    {
+        // 使用results中优化后的位姿来更新初始位姿
+        gtsam::Pose3 pose = results.at(i).cast<gtsam::Pose3>();
+        assign_qt(init_pose[i].q, init_pose[i].t, Eigen::Quaterniond(pose.rotation().toQuaternion()), pose.translation());
+    }
+    mypcl::write_pose(init_pose, data_path); // 保存优化后的位姿
+    std::cout << "----------GTSAM-PGO COMPLETE!-----------" << std::endl;
+}
 
 void cut_voxel(unordered_map<VOXEL_LOC, OCTO_TREE_ROOT *> &feat_map,
                pcl::PointCloud<PointType> &feat_pt,
                Eigen::Quaterniond q, Eigen::Vector3d t, int fnum,
                double voxel_size, int window_size, float eigen_ratio)
 {
-  float loc_xyz[3];
-  for (PointType &p_c : feat_pt.points)
-  {
-    Eigen::Vector3d pvec_orig(p_c.x, p_c.y, p_c.z);
-    Eigen::Vector3d pvec_tran = q * pvec_orig + t;
-
-    for (int j = 0; j < 3; j++)
+    float loc_xyz[3];
+    for (PointType &p_c : feat_pt.points)
     {
-      loc_xyz[j] = pvec_tran[j] / voxel_size;
-      if (loc_xyz[j] < 0)
-        loc_xyz[j] -= 1.0;
-    }
+        Eigen::Vector3d pvec_orig(p_c.x, p_c.y, p_c.z);
+        Eigen::Vector3d pvec_tran = q * pvec_orig + t;
 
-    VOXEL_LOC position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
-    auto iter = feat_map.find(position);
-    if (iter != feat_map.end())
-    {
-      iter->second->vec_orig[fnum].push_back(pvec_orig);
-      iter->second->vec_tran[fnum].push_back(pvec_tran);
+        for (int j = 0; j < 3; j++)
+        {
+            loc_xyz[j] = pvec_tran[j] / voxel_size;
+            if (loc_xyz[j] < 0)
+                loc_xyz[j] -= 1.0;
+        }
 
-      iter->second->sig_orig[fnum].push(pvec_orig);
-      iter->second->sig_tran[fnum].push(pvec_tran);
-    }
-    else // 如果未找到，创建一个新的体素树根节点，并将其添加到feat_map中
-    {
-      OCTO_TREE_ROOT *ot = new OCTO_TREE_ROOT(window_size, eigen_ratio);
-      ot->vec_orig[fnum].push_back(pvec_orig);
-      ot->vec_tran[fnum].push_back(pvec_tran);
-      ot->sig_orig[fnum].push(pvec_orig);
-      ot->sig_tran[fnum].push(pvec_tran);
+        VOXEL_LOC position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
+        auto iter = feat_map.find(position);
+        if (iter != feat_map.end())
+        {
+            iter->second->vec_orig[fnum].push_back(pvec_orig);
+            iter->second->vec_tran[fnum].push_back(pvec_tran);
 
-      ot->voxel_center[0] = (0.5 + position.x) * voxel_size;
-      ot->voxel_center[1] = (0.5 + position.y) * voxel_size;
-      ot->voxel_center[2] = (0.5 + position.z) * voxel_size;
-      ot->quater_length = voxel_size / 4.0;
-      ot->layer = 0;
-      feat_map[position] = ot;
+            iter->second->sig_orig[fnum].push(pvec_orig);
+            iter->second->sig_tran[fnum].push(pvec_tran);
+        }
+        else // 如果未找到，创建一个新的体素树根节点，并将其添加到feat_map中
+        {
+            OCTO_TREE_ROOT *ot = new OCTO_TREE_ROOT(window_size, eigen_ratio);
+            ot->vec_orig[fnum].push_back(pvec_orig);
+            ot->vec_tran[fnum].push_back(pvec_tran);
+            ot->sig_orig[fnum].push(pvec_orig);
+            ot->sig_tran[fnum].push(pvec_tran);
+
+            ot->voxel_center[0] = (0.5 + position.x) * voxel_size;
+            ot->voxel_center[1] = (0.5 + position.y) * voxel_size;
+            ot->voxel_center[2] = (0.5 + position.z) * voxel_size;
+            ot->quater_length = voxel_size / 4.0;
+            ot->layer = 0;
+            feat_map[position] = ot;
+        }
     }
-  }
 }
-
-// 非当前图层的最后一个线程，底层向上ba
-void parallel_comp(LAYER &layer, int thread_id, LAYER &next_layer)
+void parallel_compute_tool(LAYER &layer, int thread_id, LAYER &next_layer, int i, int win_size)
 {
-  int &part_length = layer.part_length;
-  int &layer_num = layer.layer_num;
-  // 处理当前线程的任务
-  for (int i = thread_id * part_length; i < (thread_id + 1) * part_length; i++)
-  {
+    double t_temp = 0;
+    //cout << "Current thread id: " << thread_id + 1 << " layer num: " << layer.layer_num << endl;
+    // raw_pc为当前窗口原始的点云，src_pc为降采样+转换+合并后的点云
     vector<pcl::PointCloud<PointType>::Ptr> src_pc, raw_pc;
-    src_pc.resize(WIN_SIZE);
-    raw_pc.resize(WIN_SIZE);
+    src_pc.resize(win_size);
+    raw_pc.resize(win_size);
 
-    double residual_cur = 0, residual_pre = 0;
-    vector<IMUST> x_buf(WIN_SIZE);
+    double residual_cur = 0, residual_pre = 0; // 当前残差，上一次残差
+    vector<IMUST> x_buf(win_size);             // 状态量
+
     // 计算每个窗口内的位姿
-    for (int j = 0; j < WIN_SIZE; j++)
+    for (int j = 0; j < win_size; j++)
     {
-      x_buf[j].R = layer.pose_vec[i * GAP + j].q.toRotationMatrix();
-      x_buf[j].p = layer.pose_vec[i * GAP + j].t;
+        x_buf[j].R = layer.pose_vec[i * GAP + j].q.toRotationMatrix();
+        x_buf[j].p = layer.pose_vec[i * GAP + j].t;
     }
-
-    if (layer_num != 1)                                      // 非底层
-      for (int j = i * GAP; j < i * GAP + WIN_SIZE; j++)     // 从上一层的位姿中读取位姿
-        src_pc[j - i * GAP] = (*layer.pcds[j]).makeShared(); // 将点云赋值给当前窗口的点云
-
+    
+    if (layer.layer_num != 1) // 非底层
+    {
+        t_temp = rclcpp::Clock().now().seconds();
+        for (int j = i * GAP; j < i * GAP + win_size; j++)
+        {
+            src_pc[j - i * GAP] = (*layer.pcds[j]).makeShared();
+        }
+        //cout << "load pcd time: " << rclcpp::Clock().now().seconds() - t_temp << endl;
+    }
     size_t mem_cost = 0;
     for (int loop = 0; loop < layer.max_iter; loop++)
     {
-      if (layer_num == 1)                                  // 底层
-        for (int j = i * GAP; j < i * GAP + WIN_SIZE; j++) // 遍历整个窗口，从路径中读取pcd文件
+        if (layer.layer_num == 1)
         {
-          if (loop == 0)
-          {
-            pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-            mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
-            raw_pc[j - i * GAP] = pc;
-          }
-          src_pc[j - i * GAP] = (*raw_pc[j - i * GAP]).makeShared();
+            t_temp = rclcpp::Clock().now().seconds();
+            // 从路径中读取点云pcd文件, 逐窗口读取
+            for (int j = i * GAP; j < i * GAP + win_size; j++)
+            {
+                if (loop == 0)
+                {
+
+                    pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>); // 创建点云指针
+                    mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+                    raw_pc[j - i * GAP] = pc;
+                }
+                src_pc[j - i * GAP] = (*raw_pc[j - i * GAP]).makeShared();
+            }
+            //cout << "load pcd time: " << rclcpp::Clock().now().seconds() - t_temp << endl;
         }
 
-      unordered_map<VOXEL_LOC, OCTO_TREE_ROOT *> surf_map;
+        // 建立体素地图
+        unordered_map<VOXEL_LOC, OCTO_TREE_ROOT *> surf_map;
 
-      for (size_t j = 0; j < WIN_SIZE; j++)
-      {
-        if (layer.downsample_size > 0)
-          downsample_voxel(*src_pc[j], layer.downsample_size); // 体素降采样
-        cut_voxel(surf_map, *src_pc[j], Eigen::Quaterniond(x_buf[j].R), x_buf[j].p,
-                  j, layer.voxel_size, WIN_SIZE, layer.eigen_ratio); // 分割体素，将体素放入surf_map中
-      }
-      for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-        iter->second->recut();
+        // 对该窗口进行体素降采样并划分这个窗口的根节点体素
+        for (size_t j = 0; j < win_size; j++)
+        {
+            if (layer.downsample_size > 0)
+            {
+                t_temp = rclcpp::Clock().now().seconds();
+                downsample_voxel(*src_pc[j], layer.downsample_size);
+                //cout << "downsample time: " << rclcpp::Clock().now().seconds() - t_temp << endl;
+                t_temp = 0;
 
-      VOX_HESS voxhess(WIN_SIZE);
-      for (auto iter = surf_map.begin(); iter != surf_map.end(); iter++)
-        iter->second->tras_opt(voxhess); // 体素优化器
+            }
+            cut_voxel(surf_map, *src_pc[j], Eigen::Quaterniond(x_buf[j].R), x_buf[j].p, j, layer.voxel_size, win_size, layer.eigen_ratio);
+            //cout << "cut voxel time: " << rclcpp::Clock().now().seconds() - t_temp << endl;
+        }
 
-      VOX_OPTIMIZER opt_lsv(WIN_SIZE);
-      opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio); // 去除离群点
-      PLV(6)
-      hess_vec;
+        t_temp = rclcpp::Clock().now().seconds();
+        // 继续划分体素，确定体素的特征，完成体素地图的建立
+        for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
+        {
+            iter->second->recut();
+        }
+        //cout << "recut time: " << rclcpp::Clock().now().seconds() - t_temp << endl;
 
-      // 阻尼迭代,其核心思想是在每次迭代更新时引入一个“阻尼”因子，通过控制步长来确保迭代过程的稳定性，并避免过大的跳跃或震荡。
-      opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost); // 计算出当前的残差、内存成本和hessian矩阵
+        // 进行优化过程
+        VOX_HESS voxhess(win_size);
+        t_temp = rclcpp::Clock().now().seconds();
+        for (auto iter = surf_map.begin(); iter != surf_map.end(); iter++)
+        {
+            // 向体素容器中添加体素的特征、点云数据(ifdef ENABLE_FILTER)
+            iter->second->tras_opt(voxhess);
+        }
+        //cout << "tras_opt time: " << rclcpp::Clock().now().seconds() - t_temp << endl;
 
-      for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-        delete iter->second;
+        VOX_OPTIMIZER opt_lsv(win_size);
+        t_temp = rclcpp::Clock().now().seconds();
+        // 去除该窗口内的离群点，一个窗口内去除最多ratio比例的离群点
+        opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio);
+        //cout << "remove outlier time: " << rclcpp::Clock().now().seconds() - t_temp << endl;
+        PLV(6)
+        hess_vec;
 
-      if (loop > 0 && abs(residual_pre - residual_cur) / abs(residual_cur) < 0.05 || loop == layer.max_iter - 1)
-      {
-        if (layer.mem_costs[thread_id] < mem_cost)
-          layer.mem_costs[thread_id] = mem_cost; // 如果当前线程的内存成本小于计算的内存成本，则更新内存成本。
+        // 窗口内进行阻尼迭代
+        t_temp = rclcpp::Clock().now().seconds();
+        opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
+        //cout << "damping_iter time: " << rclcpp::Clock().now().seconds() - t_temp << endl;
 
-        for (int j = 0; j < WIN_SIZE * (WIN_SIZE - 1) / 2; j++)
-          layer.hessians[i * (WIN_SIZE - 1) * WIN_SIZE / 2 + j] = hess_vec[j]; // 将hessian矩阵赋值给当前线程的hessian矩阵
+        for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
+        {
+            // 释放体素地图的内存，其实是只删除了second，也就是octo_tree_root的部分
 
-        break;
-      }
-      residual_pre = residual_cur; // 更新上一次的残差
+            delete iter->second;
+        }
+
+        // 更新hess和内存占用量
+        if (loop > 0 && abs(residual_pre - residual_cur) / abs(residual_cur) < 0.05 || loop == layer.max_iter - 1)
+        {
+            // 将内存占用更新为当前的最大值
+            if (layer.mem_costs[thread_id] < mem_cost)
+            {
+                layer.mem_costs[thread_id] = mem_cost;
+            }
+
+            if (win_size == WIN_SIZE)
+            {
+                // 更新hessians, 一个窗口内有WIN_SIZE * (WIN_SIZE - 1) / 2个hessian矩阵
+                for (int j = 0; j < win_size * (win_size - 1) / 2; j++)
+                {
+                    // 存储hessian矩阵
+                    layer.hessians[i * (win_size - 1) * win_size / 2 + j] = hess_vec[j];
+                }
+            }
+            else
+            {
+                for (int j = 0; j < win_size * (win_size - 1) / 2; j++)
+                {
+                    layer.hessians[i * (WIN_SIZE - 1) * WIN_SIZE / 2 + j] = hess_vec[j];
+                }
+            }
+
+            break;
+        }
+        residual_pre = residual_cur; // 更新上一次的残差
     }
-    cout << thread_id + 1<<"  thread's" <<"Layer  " << layer.layer_num << "  's residual = "<< residual_cur <<endl;
-
-    pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>); // 关键帧点云
-    for (size_t j = 0; j < WIN_SIZE; j++)
+    //cout << thread_id + 1<<"  thread's" <<"Layer  " << layer.layer_num << "  's residual = "<< residual_cur <<endl;
+    pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>); // 一个窗口的总点云
+    for (size_t j = 0; j < win_size; j++)
     {
-      Eigen::Quaterniond q_tmp;
-      Eigen::Vector3d t_tmp;
-      assign_qt(q_tmp, t_tmp, Quaterniond(x_buf[0].R.inverse() * x_buf[j].R),
-                x_buf[0].R.inverse() * (x_buf[j].p - x_buf[0].p)); // 计算相对于窗口内第一个点的相对位移和旋转
+        Eigen::Quaterniond q_tmp;
+        Eigen::Vector3d t_tmp;
+        // 将x_buf中的R和t，先转到窗口内的第一个位姿的坐标系下后，赋值给q_tmp和t_tmp, 这里的.inverse()等价于.transpose()
+        assign_qt(q_tmp, t_tmp, Eigen::Quaterniond(x_buf[0].R.inverse() * x_buf[j].R), x_buf[0].R.inverse() * (x_buf[j].p - x_buf[0].p));
 
-      pcl::PointCloud<PointType>::Ptr pc_oneframe(new pcl::PointCloud<PointType>); // 归一化点云？？？？
-      mypcl::transform_pointcloud(*src_pc[j], *pc_oneframe, t_tmp, q_tmp);
-      pc_keyframe = mypcl::append_cloud(pc_keyframe, *pc_oneframe); // 合并点云
+        // 一个位姿对应的点云
+        pcl::PointCloud<PointType>::Ptr pc_oneframe(new pcl::PointCloud<PointType>);
+
+        // 将点云src_pc按照q_tmp和t_tmp进行变换,也就是把每个窗口的每个位姿的点云转换到第一个位姿的坐标系下，结果存储在pc_oneframe中
+        mypcl::transform_pointcloud(*src_pc[j], *pc_oneframe, t_tmp, q_tmp);
+        pc_keyframe = mypcl::append_cloud(pc_keyframe, *pc_oneframe); // 将每一个位姿对应的点云合并到窗口内的点云
     }
     downsample_voxel(*pc_keyframe, 0.05); // 体素降采样
-    next_layer.pcds[i] = pc_keyframe;     // 将关键帧点云赋值给下一层的pcd
-  }
+    // 这个窗口内的点云赋值给下一层的pcd，直观来讲，就是将这个窗口的所有点云集中到第一个位姿的点云中，因为下一层只取这层的每个窗口的第一个位姿
+    next_layer.pcds[i] = pc_keyframe;
+    //cout << "Current task complete, thread_id = "<< thread_id + 1 << "layer = "<< layer.layer_num << endl;
 }
 
-// 顶层
+// 执行某层非最后一个线程的并行计算
+void parallel_head(LAYER &layer, int thread_id, LAYER &next_layer)
+{
+    int &part_length = layer.part_length;
+    int &layer_num = layer.layer_num;
+
+    // 处理当前层每一个线程的任务，也就是处理每个窗口
+    for (int i = thread_id * part_length; i < (thread_id + 1) * part_length; i++)
+    {
+        parallel_compute_tool(layer, thread_id, next_layer, i, WIN_SIZE);
+    }
+}
+
+// 执行最后一个线程的并行计算
 void parallel_tail(LAYER &layer, int thread_id, LAYER &next_layer)
 {
-  int &part_length = layer.part_length;
-  int &layer_num = layer.layer_num;
-  int &left_gap_num = layer.left_gap_num;
+    int &part_length = layer.part_length;
+    int &layer_num = layer.layer_num;
+    int &left_gap_num = layer.left_gap_num;
 
-  double load_t = 0, undis_t = 0, dsp_t = 0, cut_t = 0, recut_t = 0, total_t = 0,
-         tran_t = 0, sol_t = 0, save_t = 0;
+    // 记录各种事件的时间
+    // double load_t = 0, undis_t = 0, dsp_t = 0, cut_t = 0, recut_t = 0, total_t = 0, tran_t = 0, sol_t = 0, save_t = 0;
 
-  if (layer.gap_num - (layer.thread_num - 1) * part_length + 1 != left_gap_num)
-    printf("THIS IS WRONG!\n"); // 如果剩余的位姿数量不等于剩余的任务量，输出错误信息
-
-  for (uint i = thread_id * part_length; i < thread_id * part_length + left_gap_num; i++) // 遍历每一次滑动窗口
-  {
-    printf("parallel computing %d\n", i);
-    double t0, t1;
-    double t_begin = rclcpp::Clock().now().seconds();
-
-    vector<pcl::PointCloud<PointType>::Ptr> src_pc, raw_pc;
-    src_pc.resize(WIN_SIZE);
-    raw_pc.resize(WIN_SIZE);
-
-    double residual_cur = 0, residual_pre = 0;
-    vector<IMUST> x_buf(WIN_SIZE);
-    for (int j = 0; j < WIN_SIZE; j++) // 计算每个窗口内的位姿
+    if (layer.gap_num - (layer.thread_num - 1) * part_length + 1 != left_gap_num)
     {
-      x_buf[j].R = layer.pose_vec[i * GAP + j].q.toRotationMatrix();
-      x_buf[j].p = layer.pose_vec[i * GAP + j].t;
+        std::cout<< "This layer's left_gap_num is wrong!" << endl;
     }
 
-    if (layer_num != 1) // 非底层
+    // 处理最后一个线程的满窗口
+    for (uint i = thread_id * part_length; i < thread_id * part_length + left_gap_num; i++)
     {
-      t0 = rclcpp::Clock().now().seconds();
-      for (int j = i * GAP; j < i * GAP + WIN_SIZE; j++)
-        src_pc[j - i * GAP] = (*layer.pcds[j]).makeShared();
-      load_t += rclcpp::Clock().now().seconds() - t0; // 复制上一层的pcd并记录加载时间
+        parallel_compute_tool(layer, thread_id, next_layer, i, WIN_SIZE);
     }
 
-    size_t mem_cost = 0;
-    for (int loop = 0; loop < layer.max_iter; loop++)
+    if (layer.tail > 0)
     {
-      if (layer_num == 1) // 底层
-      {
-        t0 = rclcpp::Clock().now().seconds();
-        for (int j = i * GAP; j < i * GAP + WIN_SIZE; j++)
-        {
-          if (loop == 0)
-          {
-            pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-            mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
-            raw_pc[j - i * GAP] = pc;
-          }
-          src_pc[j - i * GAP] = (*raw_pc[j - i * GAP]).makeShared();
-        }
-        load_t += rclcpp::Clock().now().seconds() - t0;
-      }
-
-      unordered_map<VOXEL_LOC, OCTO_TREE_ROOT *> surf_map;
-
-      for (size_t j = 0; j < WIN_SIZE; j++)
-      {
-        t0 = rclcpp::Clock().now().seconds();
-        if (layer.downsample_size > 0)
-          downsample_voxel(*src_pc[j], layer.downsample_size); // 体素降采样
-        dsp_t += rclcpp::Clock().now().seconds() - t0;
-
-        t0 = rclcpp::Clock().now().seconds();
-        cut_voxel(surf_map, *src_pc[j], Quaterniond(x_buf[j].R), x_buf[j].p,
-                  j, layer.voxel_size, WIN_SIZE, layer.eigen_ratio); // 分割体素
-        cut_t += rclcpp::Clock().now().seconds() - t0;
-      }
-
-      t0 = rclcpp::Clock().now().seconds();
-      for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-        iter->second->recut(); // 重新分割
-      recut_t += rclcpp::Clock().now().seconds() - t0;
-
-      t0 = rclcpp::Clock().now().seconds();
-      VOX_HESS voxhess(WIN_SIZE);
-      for (auto iter = surf_map.begin(); iter != surf_map.end(); iter++)
-        iter->second->tras_opt(voxhess); // 体素优化器
-      tran_t += rclcpp::Clock().now().seconds() - t0;
-
-      VOX_OPTIMIZER opt_lsv(WIN_SIZE);
-      t0 = rclcpp::Clock().now().seconds();
-      opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio); // 去除离群点
-      PLV(6)
-      hess_vec;
-      opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost); // 阻尼迭代,计算当前的残差，内存成本和hessian矩阵
-      sol_t += rclcpp::Clock().now().seconds() - t0;
-
-      for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-        delete iter->second;
-
-      if (loop > 0 && abs(residual_pre - residual_cur) / abs(residual_cur) < 0.05 || loop == layer.max_iter - 1)
-      {
-        if (layer.mem_costs[thread_id] < mem_cost)
-          layer.mem_costs[thread_id] = mem_cost; // 如果当前线程的内存成本小于计算的内存成本，则更新内存成本。
-
-        if (i < thread_id * part_length + left_gap_num)
-          for (int j = 0; j < WIN_SIZE * (WIN_SIZE - 1) / 2; j++)
-            layer.hessians[i * (WIN_SIZE - 1) * WIN_SIZE / 2 + j] = hess_vec[j]; // 更新hessian矩阵
-
-        break;
-      }
-      residual_pre = residual_cur;
+        int i = thread_id * part_length + left_gap_num;
+        parallel_compute_tool(layer, thread_id, next_layer, i, layer.last_win_size);
     }
-    cout << thread_id + 1<<"  thread's" <<"Layer  " << layer.layer_num << "  's residual = "<< residual_cur <<endl;
-
-    pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>);
-    for (size_t j = 0; j < WIN_SIZE; j++)
-    {
-      t1 = rclcpp::Clock().now().seconds();
-      Eigen::Quaterniond q_tmp;
-      Eigen::Vector3d t_tmp;
-      assign_qt(q_tmp, t_tmp, Quaterniond(x_buf[0].R.inverse() * x_buf[j].R),
-                x_buf[0].R.inverse() * (x_buf[j].p - x_buf[0].p)); // 计算相对于窗口内第一个点的相对位移和旋转
-
-      pcl::PointCloud<PointType>::Ptr pc_oneframe(new pcl::PointCloud<PointType>);
-      mypcl::transform_pointcloud(*src_pc[j], *pc_oneframe, t_tmp, q_tmp); // 变换点云
-      pc_keyframe = mypcl::append_cloud(pc_keyframe, *pc_oneframe);        // 合并点云
-      save_t += rclcpp::Clock().now().seconds() - t1;
-    }
-    t0 = rclcpp::Clock().now().seconds();
-    downsample_voxel(*pc_keyframe, 0.05); // 体素降采样
-    dsp_t += rclcpp::Clock().now().seconds() - t0;
-
-    t0 = rclcpp::Clock().now().seconds();
-    next_layer.pcds[i] = pc_keyframe; // 将关键帧点云赋值给下一层的pcd
-    save_t += rclcpp::Clock().now().seconds() - t0;
-
-    total_t += rclcpp::Clock().now().seconds() - t_begin;
-  }
-  if (layer.tail > 0) // 若该层按照滑动窗口处理后，剩余的位姿数量仍>0，接下来将剩下的位姿一并处理，方法与窗口内的一致
-  {
-    int i = thread_id * part_length + left_gap_num;
-
-    vector<pcl::PointCloud<PointType>::Ptr> src_pc, raw_pc;
-    src_pc.resize(layer.last_win_size);
-    raw_pc.resize(layer.last_win_size);
-
-    double residual_cur = 0, residual_pre = 0;
-    vector<IMUST> x_buf(layer.last_win_size);
-    for (int j = 0; j < layer.last_win_size; j++)
-    {
-      x_buf[j].R = layer.pose_vec[i * GAP + j].q.toRotationMatrix();
-      x_buf[j].p = layer.pose_vec[i * GAP + j].t;
-    }
-
-    if (layer_num != 1)
-    {
-      for (int j = i * GAP; j < i * GAP + layer.last_win_size; j++)
-        src_pc[j - i * GAP] = (*layer.pcds[j]).makeShared();
-    }
-
-    size_t mem_cost = 0;
-    for (int loop = 0; loop < layer.max_iter; loop++)
-    {
-      if (layer_num == 1)
-        for (int j = i * GAP; j < i * GAP + layer.last_win_size; j++)
-        {
-          if (loop == 0)
-          {
-            pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
-            mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
-            raw_pc[j - i * GAP] = pc;
-          }
-          src_pc[j - i * GAP] = (*raw_pc[j - i * GAP]).makeShared();
-        }
-
-      unordered_map<VOXEL_LOC, OCTO_TREE_ROOT *> surf_map;
-
-      for (size_t j = 0; j < layer.last_win_size; j++)
-      {
-        if (layer.downsample_size > 0)
-          downsample_voxel(*src_pc[j], layer.downsample_size);
-        cut_voxel(surf_map, *src_pc[j], Quaterniond(x_buf[j].R), x_buf[j].p,
-                  j, layer.voxel_size, layer.last_win_size, layer.eigen_ratio);
-      }
-      for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-        iter->second->recut();
-
-      VOX_HESS voxhess(layer.last_win_size);
-      for (auto iter = surf_map.begin(); iter != surf_map.end(); iter++)
-        iter->second->tras_opt(voxhess);
-
-      VOX_OPTIMIZER opt_lsv(layer.last_win_size);
-      opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio);
-      PLV(6)
-      hess_vec;
-      opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
-
-      for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-        delete iter->second;
-
-      if (loop > 0 && abs(residual_pre - residual_cur) / abs(residual_cur) < 0.05 || loop == layer.max_iter - 1)
-      {
-        if (layer.mem_costs[thread_id] < mem_cost)
-          layer.mem_costs[thread_id] = mem_cost;
-
-        for (int j = 0; j < layer.last_win_size * (layer.last_win_size - 1) / 2; j++)
-          layer.hessians[i * (WIN_SIZE - 1) * WIN_SIZE / 2 + j] = hess_vec[j];
-
-        break;
-      }
-      residual_pre = residual_cur;
-    }
-    cout << thread_id + 1<<"  thread's" <<"Layer  " << layer.layer_num << "  's residual = "<< residual_cur <<endl;
-
-    pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>);
-    for (size_t j = 0; j < layer.last_win_size; j++)
-    {
-      Eigen::Quaterniond q_tmp;
-      Eigen::Vector3d t_tmp;
-      assign_qt(q_tmp, t_tmp, Quaterniond(x_buf[0].R.inverse() * x_buf[j].R),
-                x_buf[0].R.inverse() * (x_buf[j].p - x_buf[0].p));
-
-      pcl::PointCloud<PointType>::Ptr pc_oneframe(new pcl::PointCloud<PointType>);
-      mypcl::transform_pointcloud(*src_pc[j], *pc_oneframe, t_tmp, q_tmp);
-      pc_keyframe = mypcl::append_cloud(pc_keyframe, *pc_oneframe);
-    }
-    downsample_voxel(*pc_keyframe, 0.05);
-    next_layer.pcds[i] = pc_keyframe;
-  }
-  printf("total time: %.2fs\n", total_t);
-  printf("load pcd %.2fs %.2f%% | undistort pcd %.2fs %.2f%% | "
-         "downsample %.2fs %.2f%% | cut voxel %.2fs %.2f%% | recut %.2fs %.2f%% | trans %.2fs %.2f%% | solve %.2fs %.2f%% | "
-         "save pcd %.2fs %.2f%%\n",
-         load_t, load_t / total_t * 100, undis_t, undis_t / total_t * 100,
-         dsp_t, dsp_t / total_t * 100, cut_t, cut_t / total_t * 100, recut_t, recut_t / total_t * 100, tran_t, tran_t / total_t * 100,
-         sol_t, sol_t / total_t * 100, save_t, save_t / total_t * 100);
 }
 
-void global_ba(LAYER &layer) // 顶层全局优化
+void global_ba(LAYER &layer)
 {
-  int window_size = layer.pose_vec.size(); // 窗口大小定义为顶层的位姿数量
-  vector<IMUST> x_buf(window_size);
-  for (int i = 0; i < window_size; i++) // 读取顶层位姿
-  {
-    x_buf[i].R = layer.pose_vec[i].q.toRotationMatrix();
-    x_buf[i].p = layer.pose_vec[i].t;
-  }
-
-  vector<pcl::PointCloud<PointType>::Ptr> src_pc;
-  src_pc.resize(window_size);
-  for (int i = 0; i < window_size; i++)
-    src_pc[i] = (*layer.pcds[i]).makeShared(); // 读顶层点云
-
-  double residual_cur = 0, residual_pre = 0;
-  size_t mem_cost = 0, max_mem = 0;
-  double dsp_t = 0, cut_t = 0, recut_t = 0, tran_t = 0, sol_t = 0, t0;
-  for (int loop = 0; loop < layer.max_iter; loop++)
-  {
-    std::cout << "---------------------" << std::endl;
-    std::cout << "Iteration " << loop << std::endl;
-
-    unordered_map<VOXEL_LOC, OCTO_TREE_ROOT *> surf_map;
-
+    int window_size = layer.pose_vec.size();
+    vector<IMUST> x_buf(window_size);
     for (int i = 0; i < window_size; i++)
     {
-      t0 = rclcpp::Clock().now().seconds();
-      if (layer.downsample_size > 0)
-        downsample_voxel(*src_pc[i], layer.downsample_size);
-      dsp_t += rclcpp::Clock().now().seconds() - t0;
-      t0 = rclcpp::Clock().now().seconds();
-      cut_voxel(surf_map, *src_pc[i], Quaterniond(x_buf[i].R), x_buf[i].p, i,
-                layer.voxel_size, window_size, layer.eigen_ratio);
-      cut_t += rclcpp::Clock().now().seconds() - t0;
+        x_buf[i].R = layer.pose_vec[i].q.toRotationMatrix();
+        x_buf[i].p = layer.pose_vec[i].t;
     }
-    t0 = rclcpp::Clock().now().seconds();
-    for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-      iter->second->recut();
-    recut_t += rclcpp::Clock().now().seconds() - t0;
 
-    t0 = rclcpp::Clock().now().seconds();
-    VOX_HESS voxhess(window_size);
-    for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-      iter->second->tras_opt(voxhess);
-    tran_t += rclcpp::Clock().now().seconds() - t0;
-
-    t0 = rclcpp::Clock().now().seconds();
-    VOX_OPTIMIZER opt_lsv(window_size);
-    opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio);
-    PLV(6)
-    hess_vec;
-    opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
-    sol_t += rclcpp::Clock().now().seconds() - t0;
-
-    for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-      delete iter->second;
-
-    cout << "Residual absolute: " << abs(residual_pre - residual_cur) << " | "
-         << "percentage: " << abs(residual_pre - residual_cur) / abs(residual_cur) << endl;
-
-    if (loop > 0 && abs(residual_pre - residual_cur) / abs(residual_cur) < 0.05 || loop == layer.max_iter - 1)
+    vector<pcl::PointCloud<PointType>::Ptr> src_pc;
+    src_pc.resize(window_size);
+    for (int i = 0; i < window_size; i++)
     {
-      if (max_mem < mem_cost)
-        max_mem = mem_cost;
-#ifdef FULL_HESS
-      for (int i = 0; i < window_size * (window_size - 1) / 2; i++) // 遍历hessian矩阵的上三角部分元素
-        layer.hessians[i] = hess_vec[i];
-#else
-      for (int i = 0; i < window_size - 1; i++)
-      {
-        Matrix6d hess = Hess_cur.block(6 * i, 6 * i + 6, 6, 6);
-        for (int row = 0; row < 6; row++)
-          for (int col = 0; col < 6; col++)
-            hessFile << hess(row, col) << ((row * col == 25) ? "" : " ");
-        if (i < window_size - 2)
-          hessFile << "\n";
-      }
-#endif
-      break;
+        src_pc[i] = (*layer.pcds[i]).makeShared();
     }
-    residual_pre = residual_cur;
-  }
-  for (int i = 0; i < window_size; i++)
-  {
-    layer.pose_vec[i].q = Quaterniond(x_buf[i].R);
-    layer.pose_vec[i].t = x_buf[i].p;
-  }
-  printf("Downsample: %f, Cut: %f, Recut: %f, Tras: %f, Sol: %f\n", dsp_t, cut_t, recut_t, tran_t, sol_t);
+
+    double residual_cur = 0, residual_pre = 0;
+    size_t mem_cost = 0, max_mem = 0;
+
+    std::cout << "---------------------" << std::endl;
+    std::cout << "Global BA Iteration Start:" << std::endl;
+    for (int loop = 0; loop < layer.max_iter; loop++)
+    {
+        std::cout << "---------------------" << std::endl;
+        std::cout << "Iteration " << loop << std::endl;
+
+        unordered_map<VOXEL_LOC, OCTO_TREE_ROOT *> surf_map;
+
+        for (int i = 0; i < window_size; i++)
+        {
+            if (layer.downsample_size > 0)
+            {
+                downsample_voxel(*src_pc[i], layer.downsample_size);
+            }
+            cut_voxel(surf_map, *src_pc[i], Eigen::Quaterniond(x_buf[i].R), x_buf[i].p, i, layer.voxel_size, window_size, layer.eigen_ratio);
+        }
+
+        for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
+        {
+            iter->second->recut();
+        }
+
+        VOX_HESS voxhess(window_size);
+        for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
+        {
+            iter->second->tras_opt(voxhess);
+        }
+
+        VOX_OPTIMIZER opt_lsv(window_size);
+        opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio);
+        PLV(6)
+        hess_vec;
+        opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
+
+        for (auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
+        {
+            delete iter->second;
+        }
+
+        cout << "Residual absolute: " << abs(residual_pre - residual_cur) << " | "
+             << "percentage: " << abs(residual_pre - residual_cur) / abs(residual_cur) << endl;
+
+        if (loop > 0 && abs(residual_pre - residual_cur) / abs(residual_cur) < 0.05 || loop == layer.max_iter - 1)
+        {
+            if (mem_cost > max_mem)
+            {
+                max_mem = mem_cost;
+            }
+#ifdef FULL_HESS
+            for (int i = 0; i < window_size * (window_size - 1) / 2; i++)
+            {
+                layer.hessians[i] = hess_vec[i];
+            }
+#else
+            for (int i = 0; i < window_size - 1; i++)
+            {
+                Matrix6d hess = Hess_cur.block(6 * i, 6 * i + 6, 6, 6);
+                for (int row = 0; row < 6; row++)
+                {
+                    for (int col = 0; col < 6; col++)
+                    {
+                        hessFile << hess(row, col) << ((row * col == 25) ? "" : " ");
+                    }
+                }
+                if (i < window_size - 2)
+                {
+                    hessFile << "\n";
+                }
+            }
+#endif
+            break;
+        }
+        residual_pre = residual_cur;
+    }
+    // 这里不知道为什么只有顶层BA会更新pose_vec, 后面试试前面的也更新
+    for (int i = 0; i < window_size; i++)
+    {
+        layer.pose_vec[i].q = Quaterniond(x_buf[i].R);
+        layer.pose_vec[i].t = x_buf[i].p;
+    }
 }
 
 void distribute_thread(LAYER &layer, LAYER &next_layer)
 {
-  int &thread_num = layer.thread_num;
-  double t0 = rclcpp::Clock().now().seconds();
-  for (int i = 0; i < thread_num; i++)
-    if (i < thread_num - 1)
-      layer.mthreads[i] = new thread(parallel_comp, ref(layer), i, ref(next_layer));
-    else
-      layer.mthreads[i] = new thread(parallel_tail, ref(layer), i, ref(next_layer));
-  // printf("Thread distribution time: %f\n", rclcpp::Clock().now().seconds()-t0);
-  // 此时就完成了底层向上的ba
-  t0 = rclcpp::Clock().now().seconds();
-  for (int i = 0; i < thread_num; i++)
-  {
-    layer.mthreads[i]->join(); // 这会阻塞当前线程，直到 mthreads[i] 指向的线程完成执行。换句话说，当前线程会等待 mthreads[i] 线程结束。
-    delete layer.mthreads[i];  // 在等待线程完成后，使用 delete 释放 mthreads[i] 指向的线程对象的内存。这是为了避免内存泄漏。
-  }
-  // printf("Thread join time: %f\n", rclcpp::Clock().now().seconds()-t0);
+    int &thread_num = layer.thread_num;
+    // 创建线程任务
+    for (int i = 0; i < thread_num; i++)
+    {
+        if (i < thread_num - 1)
+        {
+            layer.mthreads[i] = new thread(parallel_head, ref(layer), i, ref(next_layer));
+        }
+        else
+        {
+            layer.mthreads[i] = new thread(parallel_tail, ref(layer), i, ref(next_layer));
+        }
+    }
+
+    // 分线程处理
+    for (int i = 0; i < thread_num; i++)
+    {
+        layer.mthreads[i]->join(); // 这会阻塞当前线程，直到 mthreads[i] 指向的线程完成执行。
+        delete layer.mthreads[i];  // 在等待线程完成后，使用 delete 释放 mthreads[i] 指向的线程对象的内存。这是为了避免内存泄漏。
+    }
 }
 
 class HBA_Node : public rclcpp::Node
@@ -549,7 +602,7 @@ public:
         global_ba(hba.layers[total_layer_num - 1]);
         hba.pose_graph_optimization();
 
-        printf(">>>>>HBA Iteration Complete!<<<<<<\n");
+        std::cout << "----------HBA Iteration Complete!-----------" << std::endl;
     }
     ~HBA_Node() {}
 };
