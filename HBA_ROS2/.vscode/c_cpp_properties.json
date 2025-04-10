@@ -19,13 +19,15 @@
                 "/opt/ros/humble/include/tf2/",
                 "/opt/ros/humble/include/tf2_ros/",
                 "/opt/ros/humble/include/pcl_conversions/",
+                "/opt/ros/humble/include/nav_msgs/",
                 "/usr/include/eigen3/",
                 "/usr/include/ceres/",
                 "/usr/include/pcl-1.12/",
                 "/usr/local/include/**",
                 "/usr/local/include/ceres/",
                 "/usr/local/include/gtsam/",
-                "${workspaceFolder}/include"
+                "${workspaceFolder}/include",
+                "/usr/local/include/GeographicLib/"
             ],
             "name": "ROS",
             "intelliSenseMode": "gcc-x64",

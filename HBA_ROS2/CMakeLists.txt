@@ -25,6 +25,7 @@ find_package(Eigen3 REQUIRED)
 find_package(PCL REQUIRED)
 find_package(GTSAM REQUIRED)
 find_package(yaml-cpp REQUIRED)
+find_package(GeographicLib REQUIRED)
 
 
 # uncomment the following section in order to fill in
@@ -36,6 +37,7 @@ include_directories(
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
   ${GTSAM_INCLUDE_DIRS}
+  ${GeographicLib_INCLUDE_DIRS}
 )
 
 find_package(ament_cmake_auto REQUIRED)
@@ -47,6 +49,7 @@ target_link_libraries(
   ${EIGEN3_LIBRARIES}
   ${PCL_LIBRARIES}
   ${GTSAM_LIBRARIES}
+  ${GeographicLib_INCLUDE_DIRS}
   gtsam
 )
 
@@ -55,6 +58,7 @@ target_link_libraries(
   calculate_MME
   ${EIGEN3_LIBRARIES}
   ${PCL_LIBRARIES}
+  ${GeographicLib_INCLUDE_DIRS}
   gtsam
 )
 
@@ -63,6 +67,7 @@ target_link_libraries(
   visualize
   ${EIGEN3_LIBRARIES}
   ${PCL_LIBRARIES}
+  ${GeographicLib_INCLUDE_DIRS}
   gtsam
 )
 

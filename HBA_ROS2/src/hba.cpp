@@ -1,4 +1,7 @@
 #include "hba.hpp"
+#include "gps_factor.hpp"
+
+std::vector<GPS_Factor::gps_imu_pose3d> gps_pose_vec;
 
 HBA::HBA(int total_layer_num_, std::string data_path_, int thread_num_)
 {
@@ -180,6 +183,13 @@ void HBA::pose_graph_optimization()
             graph.push_back(factor);
         }
     }
+
+    // 添加GPS因子
+    GPS_Factor gps_factor_func;
+    gps_pose_vec = gps_factor_func.read_gps_imu_data(data_path + "gps_imu_data.json");
+    gps_factor_func.Add_GPS_Factor(gps_pose_vec, init_pose, lidar_time, graph);
+
+    
     // 此时已经完成了所有因子的添加，接下来就是使用gtsam进行优化
     gtsam::ISAM2Params parameters;
     // 重新线性化阈值,由于非线性函数的特性，随着优化的进行，误差函数可能会发生较大的变化，导致线性化的误差逐渐增大。为了避免这种误差积累影响优化过程，通常会在优化的过程中引入 重新线性化 的机制
