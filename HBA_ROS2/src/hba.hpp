@@ -48,6 +48,7 @@
 #include "layer.hpp"
 #include "mypcl.hpp"
 #include "voxel.hpp"
+#include "gps_factor.hpp"
 
 using namespace std;
 using namespace Eigen;
@@ -55,6 +56,8 @@ using namespace Eigen;
 int pcd_name_fill_num = 0;
 int total_layer_num, thread_num; // 总层数量，线程数量
 string data_path;
+bool enable_gps_factor = true; // 是否启用GPS因子
+bool gps_imu_info = false; // 是否启用GPS外参
 class HBA
 {
 public:
@@ -63,12 +66,12 @@ public:
     std::string data_path;
 
     // 初始化图层状态, 主要作用是传入底层的位姿以及更新后续层的位姿
-    HBA(int total_layer_num_, std::string data_path_, int thread_num_);
+    HBA(int total_layer_num_, std::string data_path_, int thread_num_, GPS_Factor &gps_factor_func);
 
     void update_next_layer_state(int cur_layer_num);
 
     // 使用GTSAM进行位姿图优化
-    void pose_graph_optimization();
+    void pose_graph_optimization(GPS_Factor &gps_factor_func);
 };
 void parallel_compute_tool(LAYER &layer, int thread_id, LAYER &next_layer, int i, int win_size);
 
@@ -77,5 +80,6 @@ void parallel_head(LAYER &layer, int thread_id, LAYER &next_layer);
 void parallel_tail(LAYER &layer, int thread_id, LAYER &next_layer);
 void global_ba(LAYER &layer);
 void distribute_thread(LAYER &layer, LAYER &next_layer);
+void interpolate_pose(std::vector<mypcl::pose> &pose_vec_orig, std::vector<mypcl::pose> &pose_vec_tran, std::vector<double> gps_time, std::vector<double> lidar_time);
 
 #endif

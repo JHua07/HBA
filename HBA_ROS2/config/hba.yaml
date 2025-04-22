@@ -4,3 +4,4 @@
     total_layer_num: 3
     pcd_name_fill_num: 0
     thread_num: 16
+    enable_gps_factor: true
