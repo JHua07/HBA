@@ -1,6 +1,6 @@
 /**:
   ros__parameters:
-    file_path: /home/jhua/hba_data/avia1/
+    file_path: /home/jhua/datas/Vge_datas/hba_datas/need_to_handle/
     downsample_size: 0.1
     pcd_name_fill_num: 0
     marker_size: 0.5

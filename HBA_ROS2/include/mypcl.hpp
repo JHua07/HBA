@@ -25,6 +25,8 @@ typedef Eigen::Matrix<double, 6, 6> Matrix6d;
 
 // 定义激光雷达的时间戳
 std::vector<double> lidar_time;
+std::vector<double> timestamp;
+bool flag_lidar_time = false;
 
 namespace mypcl
 {
@@ -66,7 +68,7 @@ namespace mypcl
         {
             ss << num;
         }
-        pcl::io::savePCDFileBinary(filePath + ss.str() + ".pcd", *pc);
+        pcl::io::savePCDFileBinary(filePath + prefix + ss.str() + ".pcd", *pc);
     }
 
     // 读取位姿文件, 输入文件名，四元数，三维向量
@@ -84,9 +86,13 @@ namespace mypcl
 
             //位姿全部转换到第一个点云坐标系下
             pose_vec.push_back(pose(qe * q, qe * t + te));
-            lidar_time.push_back(lt);
-        }
+            if(!flag_lidar_time)
+            {
+                lidar_time.push_back(lt);
+            }
 
+        }
+        flag_lidar_time = true;
         file.close();
         return pose_vec;
     }
@@ -138,31 +144,125 @@ namespace mypcl
     void write_pose(std::vector<pose> &pose_vec, std::string path)
     {
         std::ofstream file;
-        file.open(path + "pose.json", std::ofstream::trunc);
+        file.open(path + "pose_trans.json", std::ofstream::trunc);
         file.close();
         Eigen::Quaterniond q0(pose_vec[0].q.w(), pose_vec[0].q.x(), pose_vec[0].q.y(), pose_vec[0].q.z());
         Eigen::Vector3d t0(pose_vec[0].t(0), pose_vec[0].t(1), pose_vec[0].t(2));
-        file.open(path + "pose.json", std::ofstream::app);
+        file.open(path + "pose_trans.json", std::ofstream::app);
 
         for (size_t i = 0; i < pose_vec.size(); i++)
-        {   
+        {
+
             // 位姿全部转换到第一个点云坐标系下
             //pose_vec[i].t << q0.inverse()*(pose_vec[i].t-t0);
+            /*
             pose_vec[i].q.w() = (q0.inverse() * pose_vec[i].q).w();
             pose_vec[i].q.x() = (q0.inverse() * pose_vec[i].q).x();
             pose_vec[i].q.y() = (q0.inverse() * pose_vec[i].q).y();
             pose_vec[i].q.z() = (q0.inverse() * pose_vec[i].q).z();
-            file << lidar_time[i] << " "
-                 << pose_vec[i].t(0) << " "
+            file << pose_vec[i].t(0) << " "
                  << pose_vec[i].t(1) << " "
                  << pose_vec[i].t(2) << " "
                  << pose_vec[i].q.x() << " " << pose_vec[i].q.y() << " "
                  << pose_vec[i].q.z() << " " << pose_vec[i].q.w();
             if (i < pose_vec.size() - 1)
                 file << "\n";
+            */
+            
+            file << fixed << setprecision(6)
+                 << lidar_time[i] << " "
+                 << pose_vec[i].t(0) << " "
+                 << pose_vec[i].t(1) << " "
+                 << pose_vec[i].t(2) << " "
+                 << pose_vec[i].q.x() << " " << pose_vec[i].q.y() << " "
+                 << pose_vec[i].q.z() << " " << pose_vec[i].q.w();
+             if (i < pose_vec.size() - 1)
+                 file << "\n";
         }
         file.close();
-        lidar_time.clear();
+        //lidar_time.clear();
+    }
+
+    void write_interpolate_pose(std::vector<pose> &pose_vec, std::string path)
+    {
+        std::ofstream file;
+        file.open(path + "pose_inter.json", std::ofstream::trunc);
+        file.close();
+        Eigen::Quaterniond q0(pose_vec[0].q.w(), pose_vec[0].q.x(), pose_vec[0].q.y(), pose_vec[0].q.z());
+        Eigen::Vector3d t0(pose_vec[0].t(0), pose_vec[0].t(1), pose_vec[0].t(2));
+        file.open(path + "pose_inter.json", std::ofstream::app);
+
+        for (size_t i = 0; i < pose_vec.size(); i++)
+        {
+
+            // 位姿全部转换到第一个点云坐标系下
+            //pose_vec[i].t << q0.inverse()*(pose_vec[i].t-t0);
+            /*
+            pose_vec[i].q.w() = (q0.inverse() * pose_vec[i].q).w();
+            pose_vec[i].q.x() = (q0.inverse() * pose_vec[i].q).x();
+            pose_vec[i].q.y() = (q0.inverse() * pose_vec[i].q).y();
+            pose_vec[i].q.z() = (q0.inverse() * pose_vec[i].q).z();
+            file << pose_vec[i].t(0) << " "
+                 << pose_vec[i].t(1) << " "
+                 << pose_vec[i].t(2) << " "
+                 << pose_vec[i].q.x() << " " << pose_vec[i].q.y() << " "
+                 << pose_vec[i].q.z() << " " << pose_vec[i].q.w();
+            if (i < pose_vec.size() - 1)
+                file << "\n";
+            */
+            
+            file << fixed << setprecision(6)
+                << timestamp[i] << " "
+                << pose_vec[i].t(0) << " "
+                << pose_vec[i].t(1) << " "
+                << pose_vec[i].t(2) << " "
+                << pose_vec[i].q.x() << " " << pose_vec[i].q.y() << " "
+                << pose_vec[i].q.z() << " " << pose_vec[i].q.w();
+            if (i < pose_vec.size() - 1)
+                file << "\n";
+        }
+        
+        file.close();
+        //lidar_time.clear();
+    }
+
+    void write_evo_pose(std::vector<pose> &pose_vec, std::string path)
+    {
+        std::ofstream file;
+        file.open(path + "pose_trans_evo.txt", std::ofstream::trunc);
+        file.close();
+        Eigen::Quaterniond q0(pose_vec[0].q.w(), pose_vec[0].q.x(), pose_vec[0].q.y(), pose_vec[0].q.z());
+        Eigen::Vector3d t0(pose_vec[0].t(0), pose_vec[0].t(1), pose_vec[0].t(2));
+        file.open(path + "pose_trans_evo.txt", std::ofstream::app);
+
+        for (size_t i = 0; i < pose_vec.size(); i++)
+        {   
+            /*
+            // 位姿全部转换到第一个点云坐标系下
+            //pose_vec[i].t << q0.inverse()*(pose_vec[i].t-t0);
+            pose_vec[i].q.w() = (q0.inverse() * pose_vec[i].q).w();
+            pose_vec[i].q.x() = (q0.inverse() * pose_vec[i].q).x();
+            pose_vec[i].q.y() = (q0.inverse() * pose_vec[i].q).y();
+            pose_vec[i].q.z() = (q0.inverse() * pose_vec[i].q).z();
+            file << pose_vec[i].t(0) << " "
+                 << pose_vec[i].t(1) << " "
+                 << pose_vec[i].t(2) << " "
+                 << pose_vec[i].q.x() << " " << pose_vec[i].q.y() << " "
+                 << pose_vec[i].q.z() << " " << pose_vec[i].q.w();
+            if (i < pose_vec.size() - 1)
+                file << "\n";
+            */
+           file << fixed << setprecision(6)
+                << timestamp[i] << " "
+                << pose_vec[i].t(0) << " "
+                << pose_vec[i].t(1) << " "
+                << pose_vec[i].t(2) << " "
+                << pose_vec[i].q.x() << " " << pose_vec[i].q.y() << " "
+                << pose_vec[i].q.z() << " " << pose_vec[i].q.w();
+            if (i < pose_vec.size() - 1)
+                file << "\n";
+        }
+        file.close();
     }
 }
 #endif

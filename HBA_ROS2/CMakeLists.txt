@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.11)
-cmake_policy(SET CMP0074 NEW)
-cmake_policy(SET CMP0144 NEW)
-cmake_policy(SET CMP0167 NEW)
-cmake_policy(SET CMP0148 NEW)
+#cmake_policy(SET CMP0074 NEW)
+#cmake_policy(SET CMP0144 NEW)
+#cmake_policy(SET CMP0167 NEW)
+#cmake_policy(SET CMP0148 NEW)
 project(hba)
 
-set(CMAKE_BUILD_TYPE "Release")
+set(CMAKE_BUILD_TYPE "Debug")
 ADD_COMPILE_OPTIONS(-std=c++17)
 set(CMAKE_CXX_FLAGS "-std=c++17 -O3" )
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fexceptions")
@@ -17,6 +17,8 @@ set(CMAKE_CXX_LINK_EXECUTABLE "${CMAKE_CXX_LINK_EXECUTABLE} -ldl")
 
 #add_compile_options(-Wall -Wextra -Wpedantic -Wno-unused-variable -Wno-unused-but-set-variable)
 add_definitions(-DROOT_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/\")
+
+list(APPEND CMAKE_MODULE_PATH "/usr/share/cmake/geographiclib")
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
@@ -49,7 +51,7 @@ target_link_libraries(
   ${EIGEN3_LIBRARIES}
   ${PCL_LIBRARIES}
   ${GTSAM_LIBRARIES}
-  ${GeographicLib_INCLUDE_DIRS}
+  ${GeographicLib_LIBRARIES}
   gtsam
 )
 
@@ -58,7 +60,7 @@ target_link_libraries(
   calculate_MME
   ${EIGEN3_LIBRARIES}
   ${PCL_LIBRARIES}
-  ${GeographicLib_INCLUDE_DIRS}
+  ${GeographicLib_LIBRARIES}
   gtsam
 )
 
@@ -67,7 +69,6 @@ target_link_libraries(
   visualize
   ${EIGEN3_LIBRARIES}
   ${PCL_LIBRARIES}
-  ${GeographicLib_INCLUDE_DIRS}
   gtsam
 )
 

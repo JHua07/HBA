@@ -27,7 +27,7 @@
                 "/usr/local/include/ceres/",
                 "/usr/local/include/gtsam/",
                 "${workspaceFolder}/include",
-                "/usr/local/include/GeographicLib/"
+                "/usr/include/GeographicLib"
             ],
             "name": "ROS",
             "intelliSenseMode": "gcc-x64",

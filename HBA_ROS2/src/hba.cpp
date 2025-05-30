@@ -27,10 +27,12 @@ HBA::HBA(int total_layer_num_, std::string data_path_, int thread_num_, GPS_Fact
         }
         else
         {
-            gps_pose_vec = gps_factor_func.read_gps_raw_info(data_path + "gps_raw_data.txt", data_path);
+            gps_pose_vec = gps_factor_func.read_gps_raw_info(data_path + "gps_raw_data.json", data_path);
         }
-        index_interpolate.resize(gps_pose_vec.size());
-        lio_pose_tran.resize(gps_pose_vec.size() + lio_pose_orig.size());
+        std::cout << "gps pose size = " << gps_pose_vec.size() << std::endl;
+        std::cout << "lio pose size = " << lio_pose_orig.size() << std::endl;
+        index_interpolate.reserve(gps_pose_vec.size());
+        lio_pose_tran.reserve(gps_pose_vec.size() + lio_pose_orig.size());
 
         // 执行GPS点插值前请备份你的PCD文件
         interpolate_pose(lio_pose_orig, lio_pose_tran, gps_factor_func.gps_time, lidar_time);
@@ -63,27 +65,29 @@ HBA::HBA(int total_layer_num_, std::string data_path_, int thread_num_, GPS_Fact
 void interpolate_pose(std::vector<mypcl::pose> &pose_vec_orig, std::vector<mypcl::pose> &pose_vec_tran, std::vector<double> gps_time, std::vector<double> lidar_time)
 {
     std::vector<int> index_gps2lidar;
-    index_gps2lidar.resize(gps_time.size());
     int k = 0;
     // lidar_time.size() == lio_pose.size()
     // 解释一下，例如 j = index_gps2lidar[k]， 相当于第k个GPS点对应的lio的位姿索引为j
     for(int i = 0; i < lidar_time.size(); i++)
     {
         // 需要寻找到与当前激光点云时间最接近的GPS时间
-        if(fabs(lidar_time[i] - gps_time[index_gps2lidar[k]]) > 0.05)
+        for(int j = k; j < gps_time.size(); j++)
         {
-            k++;
-            continue;
-        }
-        else
-        {
-            index_gps2lidar[k] = i;
-            k++;
-        }
+            if(fabs(lidar_time[i] - gps_time[j]) < 0.06 && gps_time[j] < lidar_time.back())
+            {
+                index_gps2lidar.push_back(i);
+                k++;
+                break;
+            }
+        }   
     }
+
+    std::cout << "lidar gps match_point :" << index_gps2lidar.size() << std::endl;
 
     k = 0;
     // 找到索引之后，进行线性插值
+    //std::cout << "lidar_time_size: " << lidar_time.size() << std::endl;
+    //std::cout << pose_vec_tran.size() << std::endl;
     for (int j = 0; j < lidar_time.size(); j++)
     {
         // 如果找的到索引，说明此时需要对GPS点进行插值
@@ -92,71 +96,114 @@ void interpolate_pose(std::vector<mypcl::pose> &pose_vec_orig, std::vector<mypcl
             mypcl::pose pose_temp;
             if (gps_time[k] >= lidar_time[index_gps2lidar[k]])
             {
-                pose_temp.t = pose_vec_orig[index_gps2lidar[k]].t + (gps_time[k] - lidar_time[index_gps2lidar[k]]) * (pose_vec_orig[index_gps2lidar[k] + 1].t - pose_vec_orig[index_gps2lidar[k]].t) / (lidar_time[index_gps2lidar[k] + 1] - lidar_time[index_gps2lidar[k]]);
-                pose_temp.q = pose_vec_orig[index_gps2lidar[k]].q.slerp((gps_time[k] - lidar_time[index_gps2lidar[k]]) / (lidar_time[index_gps2lidar[k] + 1] - lidar_time[index_gps2lidar[k]]), pose_vec_orig[index_gps2lidar[k] + 1].q);
+                //std::cout << "***11111****  k = " << k << "," << gps_time[k] << "----" <<"j =" << j << "," << lidar_time[j] << std::endl;
+                pose_temp.t = pose_vec_orig[j].t + ((gps_time[k] - lidar_time[j]) * (pose_vec_orig[j + 1].t - pose_vec_orig[j].t) / (lidar_time[j + 1] - lidar_time[j]));
+                pose_temp.q = pose_vec_orig[j].q.slerp((gps_time[k] - lidar_time[j]) / (lidar_time[j + 1] - lidar_time[j]), pose_vec_orig[j + 1].q);
+                
+                pose_vec_tran.push_back(pose_vec_orig[index_gps2lidar[k]]);
                 pose_vec_tran.push_back(pose_temp);
+
+                timestamp.push_back(lidar_time[index_gps2lidar[k]]);
+                timestamp.push_back(gps_time[k]);
+
+                index_interpolate.push_back(pose_vec_tran.size() - 1); // 记录插值后的位姿索引
             }
             else
             {
-                pose_temp.t = pose_vec_orig[index_gps2lidar[k]].t + (gps_time[k] - lidar_time[index_gps2lidar[k] - 1]) * (pose_vec_orig[index_gps2lidar[k]].t - pose_vec_orig[index_gps2lidar[k] - 1].t) / (lidar_time[index_gps2lidar[k]] - lidar_time[index_gps2lidar[k] - 1]);
-                pose_temp.q = pose_vec_orig[index_gps2lidar[k] - 1].q.slerp((gps_time[k] - lidar_time[index_gps2lidar[k] - 1]) / (lidar_time[index_gps2lidar[k]] - lidar_time[index_gps2lidar[k] - 1]), pose_vec_orig[index_gps2lidar[k]].q);
+                //std::cout << "***22222****  k = " << k << "," << gps_time[k] << "----" <<"j =" << j << "," << lidar_time[j] << std::endl;
+                pose_temp.t = pose_vec_orig[j - 1].t + ((gps_time[k] - lidar_time[j - 1]) * (pose_vec_orig[j].t - pose_vec_orig[j - 1].t) / (lidar_time[j] - lidar_time[j - 1]));
+                pose_temp.q = pose_vec_orig[j - 1].q.slerp((gps_time[k] - lidar_time[j - 1]) / (lidar_time[j] - lidar_time[j - 1]), pose_vec_orig[j].q);
+
+                timestamp.push_back(gps_time[k]);
+                timestamp.push_back(lidar_time[index_gps2lidar[k]]);
+
                 pose_vec_tran.push_back(pose_temp);
-            }
-            index_interpolate[k] = pose_vec_tran.size() - 1; // 记录插值后的位姿索引
+                index_interpolate.push_back(pose_vec_tran.size() - 1); // 记录插值后的位姿索引
+                pose_vec_tran.push_back(pose_vec_orig[index_gps2lidar[k]]);
+            }      
             k++;
         }
         else
         {
             pose_vec_tran.push_back(pose_vec_orig[j]);
+            timestamp.push_back(lidar_time[j]);
         }
     }
-    std::cout << " GPS Point has been interpolated to LIO Point" << std::endl;
+    mypcl::write_pose(pose_vec_tran, data_path);
+    std::cout << "k = " << k << std::endl;
+    std::cout << index_interpolate.size() << std::endl;
+    std::cout << " GPS Point has been interpolated to LIO Point, total_size: " << pose_vec_tran.size() << std::endl;
     
     k = 0;
     // 以上步骤完成了GPS点的pose插值，但是此时插值后的点没有对应的点云，这个时候需要根据pose进行点云的转换
-    vector<pcl::PointCloud<PointType>::Ptr> temp_pc, tran_pc;
-    temp_pc.resize(pose_vec_tran.size());
-    tran_pc.resize(pose_vec_tran.size());
+    std::vector<pcl::PointCloud<PointType>::Ptr> tran_pc;
+    pcl::PointCloud<PointType>::Ptr temp_pc(new pcl::PointCloud<PointType>);
+    tran_pc.reserve(pose_vec_tran.size());
     pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>); // 创建点云指针
 
+    int count = 0;
     for(int i = 0; i < pose_vec_tran.size(); i++)
     {
-        if(i == index_interpolate[k])
+        if (i == index_interpolate[k])
         {
-            temp_pc[i] = (*tran_pc[i - 1]).makeShared();
+            // RCLCPP_INFO(rclcpp::get_logger("hba"), "val=%ld\n", tran_pc[i - 1]->points.size());
+            pcl::PointCloud<PointType>::Ptr pc_in(new pcl::PointCloud<PointType>);
+            pcl::PointCloud<PointType>::Ptr temp_pc(new pcl::PointCloud<PointType>);
+            pc_in = tran_pc[i - 1];
+
             Eigen::Matrix3d R_from = pose_vec_tran[i - 1].q.toRotationMatrix();
             Eigen::Matrix3d R_to = pose_vec_tran[i].q.toRotationMatrix();
 
             Eigen::Matrix3d R_rel = R_to.transpose() * R_from;
-            Eigen::Vector3d t_rel = R_to.transpose() * (pose_vec_tran[i].t - pose_vec_tran[i - 1].t);
+            Eigen::Vector3d t_rel = R_to.transpose() * (pose_vec_tran[i - 1].t - pose_vec_tran[i].t);
 
-            for(const auto& ap : temp_pc[i]->points)
+            for(size_t i = 0; i < pc_in->points.size(); i++)
             {
-                Eigen::Vector3d pc_p = Eigen::Vector3d(ap.x, ap.y, ap.z);
-                Eigen::Vector3d p = R_rel * pc_p + t_rel;
-                PointType p_temp;
-                p_temp.x = p.x();
-                p_temp.y = p.y();
-                p_temp.z = p.z();
-                tran_pc[i]->points.push_back(p_temp);
+                Eigen::Vector3d pt_cur(pc_in->points[i].x, pc_in->points[i].y, pc_in->points[i].z);
+                Eigen::Vector3d pt_to;
+                pt_to = R_rel * pt_cur + t_rel;
+                temp_pc->points.push_back(pcl::PointXYZI(pt_to.x(), pt_to.y(), pt_to.z(), pc_in->points[i].intensity));
             }
+            tran_pc.push_back(temp_pc);
 
             k++;
         }
         else
         {
-            mypcl::loadPCD(data_path, pcd_name_fill_num, pc, i, "pcd/");
-            tran_pc[i] = pc;
+            mypcl::loadPCD(data_path, pcd_name_fill_num, pc, count + 1, "pcd/");
+            count++;
+            tran_pc.push_back(pc);
         }
     }
+    //std::cout << "count:" << count << std::endl;
 
     // 将pcd文件写回去
     for(int i = 0; i < pose_vec_tran.size(); i++)
     {
-        mypcl::savePCD(data_path,pcd_name_fill_num, tran_pc[i], i, "pcd/");
+        mypcl::savePCD(data_path,pcd_name_fill_num, tran_pc[i], i, "pcd_trans/");
     }
-
+    std::cout << "******All GPS Points has been add relative pcds! *****" << std::endl;
 }
+
+std::vector<mypcl::pose> write_back_pose(std::vector<mypcl::pose> lio_tran_pose)
+{
+    int k = 0;
+    std::vector<mypcl::pose> lio_pose;
+    for (int i = 0; i < lio_tran_pose.size(); i++)
+    {
+        if(i == index_interpolate[k])
+        {
+            k++;
+            continue;
+        }
+        else
+        {
+            lio_pose.push_back(lio_tran_pose[i]);
+        }
+    }
+    return lio_pose;
+}
+
 
 void HBA::update_next_layer_state(int cur_layer_num)
 {
@@ -306,12 +353,13 @@ void HBA::pose_graph_optimization(GPS_Factor &gps_factor_func)
         }
     }
     
-
+    
     if (enable_gps_factor == true)
     {
+        std::cout << index_interpolate.size() << std::endl;
         gps_factor_func.Add_GPS_Factor(gps_pose_vec, init_pose, graph, init_cov, index_interpolate);
     }
-
+    
     // 此时已经完成了所有因子的添加，接下来就是使用gtsam进行优化
     gtsam::ISAM2Params parameters;
     // 重新线性化阈值,由于非线性函数的特性，随着优化的进行，误差函数可能会发生较大的变化，导致线性化的误差逐渐增大。为了避免这种误差积累影响优化过程，通常会在优化的过程中引入 重新线性化 的机制
@@ -332,7 +380,9 @@ void HBA::pose_graph_optimization(GPS_Factor &gps_factor_func)
         gtsam::Pose3 pose = results.at(i).cast<gtsam::Pose3>();
         assign_qt(init_pose[i].q, init_pose[i].t, Eigen::Quaterniond(pose.rotation().toQuaternion()), pose.translation());
     }
-    mypcl::write_pose(init_pose, data_path); // 保存优化后的位姿
+    std::vector<mypcl::pose> init_pose_tran = write_back_pose(init_pose);
+    mypcl::write_pose(init_pose_tran, data_path); // 保存优化后的位姿
+    mypcl::write_evo_pose(init_pose, data_path); // 保存优化后的位姿
     std::cout << "----------GTSAM-PGO COMPLETE!-----------" << std::endl;
 }
 
@@ -422,7 +472,7 @@ void parallel_compute_tool(LAYER &layer, int thread_id, LAYER &next_layer, int i
                 {
 
                     pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>); // 创建点云指针
-                    mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
+                    mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd_trans/");
                     raw_pc[j - i * GAP] = pc;
                 }
                 src_pc[j - i * GAP] = (*raw_pc[j - i * GAP]).makeShared();
@@ -727,13 +777,15 @@ public:
 
         for (int i = 0; i < total_layer_num - 1; i++)
         {
-            std::cout << "---------------------" << std::endl;
+            std::cout << "----------Process No."<< i + 1 <<" Layer-----------" << std::endl;
             distribute_thread(hba.layers[i], hba.layers[i + 1]);
             hba.update_next_layer_state(i);
+            std::cout << "-------------- Done -----------" << std::endl;
         }
 
         // 全局BA
         global_ba(hba.layers[total_layer_num - 1]);
+        mypcl::write_interpolate_pose(hba.layers[0].pose_vec, data_path);
         hba.pose_graph_optimization(gps_factor_func);
 
         std::cout << "----------HBA Iteration Complete!-----------" << std::endl;

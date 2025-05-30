@@ -57,24 +57,24 @@ class GPS_Factor
 public:
     // GNSS数据(原始)
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-    double time ;
-    std::vector<double> latitude ;
-    std::vector<double> longitude ;
-    std::vector<double> altitude ;
-    std::vector<double> local_E ;
-    std::vector<double> local_N ;
-    std::vector<double> local_U ;
+    double time;
+    std::vector<double> latitude;
+    std::vector<double> longitude;
+    std::vector<double> altitude;
+    std::vector<double> local_E;
+    std::vector<double> local_N;
+    std::vector<double> local_U;
 
     double origin_longitude;
     double origin_latitude;
     double origin_altitude;
 
     // 杆臂偏移
-    double extrinsic_T[3] = {0.0, 0.0 ,0.0};
+    double extrinsic_T[3] = {0.0, 0.0, 0.0};
 
-    std::vector<Eigen::Vector3d> pose_cov ;
+    std::vector<Eigen::Vector3d> pose_cov;
 
-    double cov_threshold = 25;      // 协方差阈值
+    double cov_threshold = 25; // 协方差阈值
 
     // GNSS数据(处理好的转换到IMU坐标系下的坐标)
     struct gps_imu_pose3d
@@ -84,21 +84,23 @@ public:
         Eigen::Vector3d t;
     };
 
-    std::vector<double> gps_time; // GPS时间
+    std::vector<double> gps_time_raw;                      // GPS原始时间
+    std::vector<double> gps_time;                          // 能够有匹配点的GPS时间
+    std::vector<GPS_Factor::gps_imu_pose3d> enu_pose;      // ENU坐标系下GPS坐标
+    std::vector<GPS_Factor::gps_imu_pose3d> gps_pose_tran; // 转换到IMU坐标系下的GPS坐标
     std::vector<gps_imu_pose3d> read_gps_imu_data(std::string filename, Eigen::Vector3d te);
     void Add_GPS_Factor(std::vector<gps_imu_pose3d> gps_pose, std::vector<mypcl::pose> lio_pose, gtsam::NonlinearFactorGraph graph, std::vector<VEC(6)> init_cov, std::vector<int> index_interpolate);
-    float pointDistance(Eigen::Vector3d p1, Eigen::Vector3d p2);
+    double pointDistance(Eigen::Vector3d p1, Eigen::Vector3d p2);
 
     // 读取输入的GPS原始信息并转换到ENU坐标系下,后利用轨迹匹配转换到IMU坐标系下
     std::vector<GPS_Factor::gps_imu_pose3d> read_gps_raw_info(std::string filename, std::string data_path);
 
-    void InitOriginPosition(double latitude, double longitude, double altitude);
-    void UpdateXYZ(double latitude, double longitude, double altitude);
+    void InitOriginPosition(double lat, double lon, double alt);
+    void UpdateXYZ(double lat, double lon, double alt);
 
     void Reverse(
-      const double &local_E, const double &local_N, const double &local_U,
-      double &lat, double &lon, double &alt
-    );
+        const double &local_E, const double &local_N, const double &local_U,
+        double &lat, double &lon, double &alt);
 
     void path_match(std::vector<mypcl::pose> lio_pose, std::vector<double> local_E, std::vector<double> local_N, std::vector<double> local_U, std::vector<double> gps_time);
 
@@ -108,15 +110,14 @@ private:
     Eigen::Matrix3d Gnss_R_wrt_Lidar;
 };
 
-
 std::vector<GPS_Factor::gps_imu_pose3d> GPS_Factor::read_gps_imu_data(std::string filename, Eigen::Vector3d te = Eigen::Vector3d(0, 0, 0))
 {
     std::vector<gps_imu_pose3d> gps_pose;
     std::fstream file;
     file.open(filename);
-    double gps_t,tx,ty,tz;
+    double gps_t, tx, ty, tz;
 
-    while(file >> gps_t >> tx >> ty >>tz)
+    while (file >> gps_t >> tx >> ty >> tz)
     {
         Eigen::Vector3d t(tx, ty, tz);
         gps_pose.push_back(gps_imu_pose3d(t + te));
@@ -128,9 +129,21 @@ std::vector<GPS_Factor::gps_imu_pose3d> GPS_Factor::read_gps_imu_data(std::strin
 
 void GPS_Factor::Add_GPS_Factor(std::vector<gps_imu_pose3d> gps_pose, std::vector<mypcl::pose> lio_pose, gtsam::NonlinearFactorGraph graph, std::vector<VEC(6)> init_cov, std::vector<int> index_interpolate)
 {
-    if(gps_pose.empty() || lidar_time.empty() || lio_pose.empty())
+    if (gps_pose.empty() || lidar_time.empty() || lio_pose.empty())
     {
         std::cout << "****some data is empty, please check your datas!****" << std::endl;
+        if (gps_pose.empty())
+        {
+            std::cout << "****  GPS Pose Empty !!!   ****" << std::endl;
+        }
+        if (lidar_time.empty())
+        {
+            std::cout << "****  Lidar Time Empty !!!   ****" << std::endl;
+        }
+        if (lio_pose.empty())
+        {
+            std::cout << "****  LIO Pose Empty !!!   ****" << std::endl;
+        }
         return;
     }
 
@@ -157,14 +170,16 @@ void GPS_Factor::Add_GPS_Factor(std::vector<gps_imu_pose3d> gps_pose, std::vecto
             continue;
         }
 
+        /*
         if(init_cov[index_interpolate[i]](0) < cov_threshold || init_cov[index_interpolate[i]](1) < cov_threshold)
         {
             std::cout << "****Input datas's cov is small enough, skip add no." << i << "gps factor****" << std::endl;
             continue;
         }
-
+        */
         // 每隔5m添加一个GPS因子
-        if(pointDistance(last_lio_pose.t, lio_pose[index_interpolate[i]].t) < 5.0)
+        //std::cout << index_interpolate.size() << std::endl;
+        if (pointDistance(last_lio_pose.t, lio_pose[index_interpolate[i]].t) < 5.0)
         {
             continue;
         }
@@ -178,11 +193,12 @@ void GPS_Factor::Add_GPS_Factor(std::vector<gps_imu_pose3d> gps_pose, std::vecto
         gtsam::noiseModel::Diagonal::shared_ptr gps_noise = gtsam::noiseModel::Diagonal::Variances(Vector3);
         gtsam::GPSFactor gps_factor(index_interpolate[i], gtsam::Point3(gps_pose[i].t.x(), gps_pose[i].t.y(), gps_pose[i].t.z()), gps_noise);
         graph.add(gps_factor);
+        std::cout << "" << "Add GPS factor no." << i << " to graph!" << std::endl;
     }
     std::cout << "****GPS factor add complete!****" << std::endl;
 }
 
-float GPS_Factor::pointDistance(Eigen::Vector3d p1, Eigen::Vector3d p2)
+double GPS_Factor::pointDistance(Eigen::Vector3d p1, Eigen::Vector3d p2)
 {
     return sqrt((p1[0] - p2[0]) * (p1[0] - p2[0]) + (p1[1] - p2[1]) * (p1[1] - p2[1]) + (p1[2] - p2[2]) * (p1[2] - p2[2]));
 }
@@ -197,13 +213,14 @@ void GPS_Factor::InitOriginPosition(double lat, double lon, double alt)
     origin_altitude = alt;
 
     // 存储原点经纬度
-    latitude.push_back(lat);
-    longitude.push_back(lon);
-    altitude.push_back(alt);
+    // latitude.push_back(lat);
+    // longitude.push_back(lon);
+    // altitude.push_back(alt);
 }
 
 // 获取更新后的ENU坐标
-void GPS_Factor::UpdateXYZ(double lat, double lon, double alt) {
+void GPS_Factor::UpdateXYZ(double lat, double lon, double alt)
+{
     double local_E_raw, local_N_raw, local_U_raw;
     geo_converter.Forward(lat, lon, alt, local_E_raw, local_N_raw, local_U_raw);
     // 存储更新后的坐标
@@ -214,8 +231,8 @@ void GPS_Factor::UpdateXYZ(double lat, double lon, double alt) {
 
 void GPS_Factor::Reverse(
     const double &local_E, const double &local_N, const double &local_U,
-    double &lat, double &lon, double &alt
-) {
+    double &lat, double &lon, double &alt)
+{
     geo_converter.Reverse(local_E, local_N, local_U, lat, lon, alt);
 }
 
@@ -228,15 +245,16 @@ std::vector<GPS_Factor::gps_imu_pose3d> GPS_Factor::read_gps_raw_info(std::strin
     double lat, lon, alt;
     bool gps_init = false;
 
-    while(file >> time >> lat >> lon >> alt >> pose_cov_src(0) >> pose_cov_src(1) >> pose_cov_src(2))
+    while (file >> time >> lat >> lon >> alt >> pose_cov_src(0) >> pose_cov_src(1) >> pose_cov_src(2))
     {
         // 读取GPS时间
-        gps_time.push_back(time);
-        // 读取协方差
+        gps_time_raw.push_back(time);
+        // std::cout << "gps_time:" << time << endl;
+        //  读取协方差
         pose_cov.push_back(pose_cov_src);
         //  初始化位置
-        if(!gps_init)
-        {           
+        if (!gps_init)
+        {
             InitOriginPosition(lat, lon, alt);
             gps_init = true;
             UpdateXYZ(lat, lon, alt);
@@ -247,50 +265,83 @@ std::vector<GPS_Factor::gps_imu_pose3d> GPS_Factor::read_gps_raw_info(std::strin
         }
     }
     file.close();
+    std::cout << "****GPS data read complete!****" << std::endl;
     // 此时完成了GPS点的读取和转换，现在的坐标在ENU坐标系下,需要转换到IMU坐标系下
     // 先读取lio_pose
     std::vector<mypcl::pose> lio_pose_orig = mypcl::read_pose(data_path + "pose.json");
-    path_match(lio_pose_orig, local_E, local_N, local_U, gps_time);
+    std::cout << "****LIO data read complete!****" << std::endl;
 
-    // 重复了，懒得改，mark一下
-    std::vector<GPS_Factor::gps_imu_pose3d> enu_pose;
-    for(int i = 0; i < gps_time.size(); i++)
+    path_match(lio_pose_orig, local_E, local_N, local_U, gps_time_raw);
+    std::cout << "****GPS data path match complete!****" << std::endl;
+
+    // 输出Gnss_R_wrt_Lidar
+    std::cout << "Gnss_R_wrt_Lidar = \n"
+              << Gnss_R_wrt_Lidar << std::endl;
+
+    gps_pose_tran.resize(enu_pose.size());
+    std::cout << "Start transform enu coordinations to IMU axis!" << std::endl;
+
+    std::vector<GPS_Factor::gps_imu_pose3d> gps_pose_trans_xyz;
+    gps_pose_trans_xyz.reserve(enu_pose.size());
+    for(int i = 0; i < enu_pose.size(); i++)
     {
-        // 将ENU坐标存到一个pose_vec中，方便后续使用
-        enu_pose[i].t = Eigen::Vector3d(local_E[i], local_N[i], local_U[i]);
+        gps_pose_trans_xyz[i].t = Gnss_R_wrt_Lidar * enu_pose[i].t + Gnss_T_wrt_Lidar;
     }
-    
-    std::vector<GPS_Factor::gps_imu_pose3d> gps_pose_tran;
-    for(int i = 0; i < gps_time.size(); i++)
+    for(int i = 0 ; i < enu_pose.size(); i++)
+    {
+        gps_pose_tran[i].t[0] = gps_pose_trans_xyz[i].t[2];
+        gps_pose_tran[i].t[1] = gps_pose_trans_xyz[i].t[1];
+        gps_pose_tran[i].t[2] = gps_pose_trans_xyz[i].t[0];
+    }
+    /*
+    for (int i = 0; i < enu_pose.size(); i++)
     {
         gps_pose_tran[i].t = Gnss_R_wrt_Lidar * enu_pose[i].t + Gnss_T_wrt_Lidar;
-    }
+    }*/
     return gps_pose_tran;
 }
 
-void GPS_Factor::path_match(std::vector<mypcl::pose> lio_pose, std::vector<double> local_E, std::vector<double> local_N, std::vector<double> local_U, std::vector<double> gps_time)
+void GPS_Factor::path_match(std::vector<mypcl::pose> lio_pose, std::vector<double> local_E, std::vector<double> local_N, std::vector<double> local_U, std::vector<double> gps_time_raw)
 {
     // 找到gps_point时间最近的lio_pose的索引
     std::vector<int> index_gps2lidar;
-    index_gps2lidar.resize(gps_time.size());
     int k = 0;
     // lidar_time.size() == lio_pose.size()
     // 解释一下，例如 j = index_gps2lidar[k]， 相当于第k个GPS点对应的lio的位姿索引为j
-    for(int i = 0; i < lidar_time.size(); i++)
+    std::cout << "lidar_time_size:" << lidar_time.size() << std::endl;
+    for (int i = 0; i < lidar_time.size(); i++)
     {
-        // 需要寻找到与当前激光点云时间最接近的GPS时间
-        if(fabs(lidar_time[i] - gps_time[index_gps2lidar[k]]) > 0.05)
+        // std::cout << "lidar_time[" << i << "]:" << lidar_time[i] << std::endl;
+        //  需要寻找到与当前激光点云时间最接近的GPS时间
+        for (int j = k; j < gps_time_raw.size(); j++)
         {
-            k++;
-            continue;
-        }
-        else
-        {
-            index_gps2lidar[k] = i;
-            k++;
+            if (fabs(lidar_time[i] - gps_time_raw[j]) < 0.06 && gps_time_raw[j] < lidar_time.back())
+            {
+                // std::cout << "no." << i + 1 << "lidar_time = " << fixed << setprecision(6) << lidar_time[i]  << endl;
+                // std::cout << "no." << j + 1 << "gps_time = " << fixed << setprecision(6)<< gps_time_raw[j]  << endl;
+                index_gps2lidar.push_back(i);
+                enu_pose.push_back(Eigen::Vector3d(local_E[i], local_N[i], local_U[i]));
+                gps_time.push_back(gps_time_raw[j]);
+                k++;
+                /*
+                if(index_gps2lidar[j] == 0 && j > 0)
+                {
+                    index_gps2lidar.pop_back();
+                    enu_pose.pop_back();
+                }
+                */
+                break;
+            }
         }
     }
 
+    std::cout << "index_gps2lidar size:" << index_gps2lidar.size() << std::endl;
+    /*
+    for(int i = 0; i < index_gps2lidar.size(); i++)
+    {
+        std::cout << "index_gps2lidar[" << i << "]:" << index_gps2lidar[i] << std::endl;
+    }
+    */
     k = 0;
     // 找到索引之后，进行线性插值, 内插计算在gps有点的时候，对应时刻的lio的位姿
     std::vector<mypcl::pose> gps_pose_in_liopath;
@@ -302,38 +353,41 @@ void GPS_Factor::path_match(std::vector<mypcl::pose> lio_pose, std::vector<doubl
             mypcl::pose pose_temp;
             if (gps_time[k] >= lidar_time[index_gps2lidar[k]])
             {
-                pose_temp.t = lio_pose[index_gps2lidar[k]].t + (gps_time[k] - lidar_time[index_gps2lidar[k]]) * (lio_pose[index_gps2lidar[k] + 1].t - lio_pose[index_gps2lidar[k]].t) / (lidar_time[index_gps2lidar[k] + 1] - lidar_time[index_gps2lidar[k]]);
-                pose_temp.q = lio_pose[index_gps2lidar[k]].q.slerp((gps_time[k] - lidar_time[index_gps2lidar[k]]) / (lidar_time[index_gps2lidar[k] + 1] - lidar_time[index_gps2lidar[k]]), lio_pose[index_gps2lidar[k] + 1].q);
+                pose_temp.t = lio_pose[j].t + (gps_time[k] - lidar_time[j]) * (lio_pose[j + 1].t - lio_pose[j].t) / (lidar_time[j + 1] - lidar_time[j]);
+                pose_temp.q = lio_pose[j].q.slerp((gps_time[k] - lidar_time[j]) / (lidar_time[j + 1] - lidar_time[j]), lio_pose[j + 1].q);
                 gps_pose_in_liopath.push_back(pose_temp);
             }
             else
             {
-                pose_temp.t = lio_pose[index_gps2lidar[k]].t + (gps_time[k] - lidar_time[index_gps2lidar[k] - 1]) * (lio_pose[index_gps2lidar[k]].t - lio_pose[index_gps2lidar[k] - 1].t) / (lidar_time[index_gps2lidar[k]] - lidar_time[index_gps2lidar[k] - 1]);
-                pose_temp.q = lio_pose[index_gps2lidar[k] - 1].q.slerp((gps_time[k] - lidar_time[index_gps2lidar[k] - 1]) / (lidar_time[index_gps2lidar[k]] - lidar_time[index_gps2lidar[k] - 1]), lio_pose[index_gps2lidar[k]].q);
+                pose_temp.t = lio_pose[j - 1].t + (gps_time[k] - lidar_time[j - 1]) * (lio_pose[j].t - lio_pose[j - 1].t) / (lidar_time[j] - lidar_time[j - 1]);
+                pose_temp.q = lio_pose[j - 1].q.slerp((gps_time[k] - lidar_time[j - 1]) / (lidar_time[j] - lidar_time[j - 1]), lio_pose[j].q);
                 gps_pose_in_liopath.push_back(pose_temp);
             }
-            index_interpolate[k] = gps_pose_in_liopath.size() - 1; // 记录插值后的位姿索引
             k++;
-        } 
+        }
     }
     std::cout << " Interpolate GPS Point to LioPath, Size:" << gps_pose_in_liopath.size() << std::endl;
-    std::vector<GPS_Factor::gps_imu_pose3d> enu_pose;
+    std::cout << "ENU_size:" << enu_pose.size() << std::endl;
+    /*
     for(int i = 0; i < gps_pose_in_liopath.size(); i++)
     {
         // 先将ENU坐标存到一个pose_vec中，方便后续使用
         enu_pose[i].t = Eigen::Vector3d(local_E[i], local_N[i], local_U[i]);
+        //enu_pose[i].t[0] = local_E[i];
+        //enu_pose[i].t[1] = local_N[i];
+        //enu_pose[i].t[2] = local_U[i];
     }
-
+    */
     // 此时enu_pose和gps_pose_in_liopath的点是一一对应的, 开始轨迹匹配
     // 1. 计算质心坐标
     Eigen::Vector3d enu_centroid = Eigen::Vector3d::Zero();
     Eigen::Vector3d lio_centroid = Eigen::Vector3d::Zero();
     size_t N = enu_pose.size();
-    for(const auto& p : enu_pose)
+    for (const auto &p : enu_pose)
     {
         enu_centroid += p.t;
     }
-    for(const auto& p : lio_pose)
+    for (const auto &p : lio_pose)
     {
         lio_centroid += p.t;
     }
@@ -342,7 +396,7 @@ void GPS_Factor::path_match(std::vector<mypcl::pose> lio_pose, std::vector<doubl
 
     // 2. 去中心化并计算协方差矩阵
     Eigen::Matrix3d CovMat = Eigen::Matrix3d::Zero();
-    for(size_t i = 0; i < N; i++)
+    for (size_t i = 0; i < N; i++)
     {
         Eigen::Vector3d enu_decent = enu_pose[i].t - enu_centroid;
         Eigen::Vector3d gps_decent = gps_pose_in_liopath[i].t - lio_centroid;
@@ -353,7 +407,7 @@ void GPS_Factor::path_match(std::vector<mypcl::pose> lio_pose, std::vector<doubl
     Eigen::JacobiSVD<Eigen::Matrix3d> svd(CovMat, Eigen::ComputeFullU | Eigen::ComputeFullV);
     Eigen::Matrix3d R = svd.matrixV() * svd.matrixU().transpose();
     // 处理反射情况
-    if(R.determinant() < 0)
+    if (R.determinant() < 0)
     {
         Eigen::Matrix3d V = svd.matrixV();
         V.col(2) *= -1;

@@ -4,7 +4,7 @@
         {
             "label": "ros2-source",
             "type": "shell",
-            "command": "source /opt/ros/humble/setup.bash && source ~/ws_hba_ros2_modified/install/setup.bash",
+            "command": "source /opt/ros/humble/setup.zsh && source ~/ws_hba_ros2_modified/install/setup.zsh",
             "problemMatcher": [],
             "group": {
                 "kind": "build",

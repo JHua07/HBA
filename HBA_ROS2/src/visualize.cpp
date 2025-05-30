@@ -52,7 +52,7 @@ public:
     sensor_msgs::msg::PointCloud2 debugMsg, cloudMsg, outMsg;
     vector<mypcl::pose> pose_vec;
 
-    pose_vec = mypcl::read_pose(file_path + "pose.json");
+    pose_vec = mypcl::read_pose(file_path + "pose_trans.json");
     size_t pose_size = pose_vec.size();
     cout << "pose size " << pose_size << endl;
 
@@ -70,7 +70,7 @@ public:
     std::cout << ">>>>>>>>>>>>Start to publish messages>>>>>>>>>>>>>>>>" << std::endl;
     for (size_t i = 0; i < pose_size; i++)
     {
-      mypcl::loadPCD(file_path + "pcd/", pcd_name_fill_num, pc_surf, i);
+      mypcl::loadPCD(file_path + "pcd_trans/", pcd_name_fill_num, pc_surf, i);
 
       pcl::PointCloud<PointType>::Ptr pc_filtered(new pcl::PointCloud<PointType>);
       pc_filtered->resize(pc_surf->points.size());

@@ -106,8 +106,11 @@
         "typeindex": "cpp",
         "typeinfo": "cpp",
         "valarray": "cpp",
-        "variant": "cpp"
+        "variant": "cpp",
+        "core": "cpp",
+        "numericaldiff": "cpp",
+        "specialfunctions": "cpp"
     },
     "ros.distro": "humle",
-    "ros.rosSetupScript": "${workspaceFolder}/install/setup.bash"
+    "ros.rosSetupScript": "${workspaceFolder}/install/local_setup.zsh"
 }
