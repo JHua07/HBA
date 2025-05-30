@@ -135,5 +135,26 @@
    * <kbd>GAP:</kbd> 滑动窗口的步长，默认为5
    * **其余定义的参数在源代码中均有注释**
 4. **启动完成后，它只会优化一次姿态。因此，如果您对结果不满意，可以再次执行启动**
+
+# GPS Factor模块
+***
+1. **基础算法说明**
+   * **两种输入模式：**<br>
+   1）在前端（如FAST-LIO2）直接输出的IMU坐标系下的GPS坐标。<br>
+   2）直接从Bag中导出的WGS84坐标系下的GPS原始经纬度坐标。首先需要将该经纬高坐标，利用GeoGraphicLib转为ENU坐标，再通过轨迹匹配获取ENU坐标系到IMU坐标系的变换矩阵，即可将GPS原始坐标转到IMU坐标系下。
+   * **里程计点及点云插值：**<br>
+   1）为了在后续准确添加GPS-Factor的约束，需要获取到每一个GPS点对应的里程计点，就需要进行线性插值。首先，依据GPS与里程计的时间戳，搜索到GPS点最近的里程计点，记录索引。根据此索引，基于时间戳将最临近的里程计点插值到对应的GPS点时刻，再记录索引。此刻得到里程计+GPS点的总点集。例如，有2500帧里程计点，对应的GPS点且与里程计时间戳差值小于0.1s的共计248帧，因此插值后得到2748个里程计点。
+   2）由于HBA整体还需要点云进行特征的约束，因此需要对点云进行赋值，简单的方法就是，若要获取第k帧后的第k+1帧（GPS点）的点云，则计算第k到k+1的变换矩阵，将k帧的点云根据该变换矩阵转换到k+1帧。
+   * **执行GPS_Factor：**<br>
+   将上述得到的点与点云全部输入HBA,在HBA::pose_graph_optimization中，根据上述的索引添加GPS_Factor，**目前点云插值可能存在Bug**，目前是在优化后只根据索引，导出原有数量的里程计点，并用原始PCD进行点云可视化。
+2. **参数说明** <br>
+   * <kbd>gps_time_raw:</kbd> GPS原始时间
+   * <kbd>gps_time</kbd> 能够有匹配点的GPS时间
+   * <kbd>enu_pose</kbd> ENU坐标系下GPS坐标
+   * <kbd>gps_pose_tran</kbd> 转换到IMU坐标系下的GPS坐标
+   * <kbd>index_interpolate</kbd> 记录GPS插值后，对应的lio的索引，例如，对于第k个GPS点，在插值之后的pose_vec_tran中，该点的索引为index_interpolate[k]
+   * <kbd>enable_gps_factor</kbd> 是否启用GPS因子
+   * <kbd>gps_imu_info</kbd> 是否启用GPS外参
+   * **其余定义的参数在源代码中均有注释**
 # 致谢及参考
 源代码来自：[HBA](https://github.com/hku-mars/HBA)
